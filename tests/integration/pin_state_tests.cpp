@@ -26,6 +26,13 @@ int main() {
         const auto width=scene.layout().expanded_width();
         std::vector<float> positions;
         for(size_t i=0;i<count;++i)positions.push_back(scene.app_x(i));
+        scene.machine.reduced_motion(false);
+        scene.machine.hold(minima::Hold::Keyboard,false,0);
+        for(int time:{0,25,50,90}){scene.machine.tick(time);for(size_t i=0;i<count;++i)if(scene.app_x(i)!=positions[i])throw std::runtime_error("Hiding utility wings moved an app");}
+        for(size_t i=0;i<count;++i){const auto button=scene.app_rect(i);if(button.left<scene.dock().left||button.right>scene.dock().right)throw std::runtime_error("Collapsed pill does not fit every pin and running app");scene.press_at(scene.app_x(i),scene.layout().center_y);if(!scene.groups[i].pressed)throw std::runtime_error("Collapsed pinned/running app press was ignored");scene.clear_press();}
+        scene.machine.hold(minima::Hold::Keyboard,true,91);
+        for(int time:{91,110,140,181}){scene.machine.tick(time);for(size_t i=0;i<count;++i)if(scene.app_x(i)!=positions[i])throw std::runtime_error("Showing utility wings moved an app");}
+        scene.machine.reduced_motion(true);
         scene.groups[1].pulse.start(0);scene.groups[1].pressed=true;
         if(scene.accept(fixture,false)||!scene.groups[1].pulse.active()||!scene.groups[1].pressed)
             throw std::runtime_error("Unchanged inventory discarded click feedback");
@@ -61,6 +68,7 @@ int main() {
             throw std::runtime_error("Removing the new app changed established slots");
         std::cout<<"Pin inventory regression passed: "<<transitions<<" open/group/minimize/close transitions, no duplicate slots, fixed expanded positions and correct running indicator state.\n";
         std::cout<<"Identity mapping passed: add/remove an unpinned app without shuffling established icons.\n";
+        std::cout<<"Fixed app strip passed: every pin/running app fits and accepts press while collapsed; all coordinates stay fixed through utility reveal/hide frames.\n";
         scene.stop_feedback();
         if(scene.feedback_moving()||scene.groups[1].pressed)throw std::runtime_error("Feedback did not settle on reduced motion/cancellation");
         return 0;

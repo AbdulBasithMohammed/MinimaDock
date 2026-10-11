@@ -78,22 +78,22 @@ int main() {
         expect(brief.progress() == 0 && !brief.needs_tick(), "brief pointer crossing reverses and settles immediately");
         DockMachine preference; preference.hold(Hold::Pointer,true,0); preference.tick(20); preference.reduced_motion(true);
         expect(preference.progress()==1 && !preference.needs_tick(), "changing motion preference finishes active animation");
-        DockLayout layout{580,700,1120,7,3,1};
+        DockLayout layout{580,700,1120,7};
         expect(DockLayout::offset(0)==-DockLayout::offset(1),"first apps balance across center");
         expect(DockLayout::offset(2)==-DockLayout::offset(3),"outer apps balance across center");
-        expect(layout.width(0)<layout.width(1),"utilities and idle pins expand outward");
-        expect(layout.app_x({0,2,0},true,0)==580+DockLayout::offset(0),"running app remains accessible collapsed");
-        expect(layout.app_x({0,2,0},true,1)==580+DockLayout::offset(4),"running app follows pins on expansion");
+        expect(layout.width(0)<layout.width(1),"only utility wings expand outward");
+        expect(layout.app_x({0,2})==580+DockLayout::offset(4),"all apps use their fixed balanced rank");
         for(float p:{0.0f,.25f,.5f,.75f,1.0f}) {
             expect(std::abs(((layout.center-layout.width(p)/2)+(layout.center+layout.width(p)/2))/2-580)<.001f,"launcher remains geometrically centered throughout expansion");
         }
         for(size_t index=0;index<8;++index)for(float p:{0.0f,.25f,.5f,.75f,1.0f}) {
-            const auto offset=layout.app_x({index%2,index/2,0},true,p)-layout.center;
+            const auto offset=layout.app_x({index%2,index/2})-layout.center;
             expect(index%2==0?offset<0:offset>0,"every app preserves its side throughout expansion and collapse");
+            expect(std::abs(offset)+18<=layout.width(p)/2,"all pinned and running app targets fit throughout hover motion");
         }
-        expect(layout.collapsed_width()>=2*std::abs(layout.app_x({0,3,2},true,0)-580)+36,"unequal running wings fit inside collapsed pill");
-        DockLayout empty{580,700,1120,4,0,0};
-        expect(empty.width(0)==80,"no running apps leaves room for centered button and separate desktop sliver");
+        expect(layout.collapsed_width()>=2*std::abs(layout.app_x({0,3})-580)+36,"all app slots fit inside collapsed pill");
+        DockLayout empty{580,700,1120,0};
+        expect(empty.width(0)==80,"no apps leaves room for centered button and separate desktop sliver");
         expect(DockLayout::expanded_height==44,"expanded pill keeps the accepted collapsed height");
         for(float progress:{0.0f,.1f,.25f,.5f,.75f,.9f,1.0f}) {
             expect(layout.height(progress)==44,"pill height stays fixed through the entire animation");
@@ -101,7 +101,7 @@ int main() {
         }
         float previous_width=0;
         for(size_t count=0;count<=40;++count) {
-            DockLayout growing{580,700,2400,count,(count+1)/2,count/2};
+            DockLayout growing{580,700,2400,count};
             expect(growing.expanded_width()==DockLayout::natural_expanded_width(count)&&growing.expanded_width()>=previous_width,"expanded width follows contents rather than fixed tile limit");
             previous_width=growing.expanded_width();
             expect(DockLayout::capacity(growing.expanded_width())>=count,"all app tiles fit at the natural content width");
@@ -111,7 +111,7 @@ int main() {
             }
         }
         expect(empty.collapsed_width()/2-4-DockLayout::desktop_width>=DockLayout::button/2,"desktop sliver does not overlap launcher when no apps are open");
-        DockLayout monitor_limited{580,700,1920,80,40,40};
+        DockLayout monitor_limited{580,700,1920,80};
         expect(monitor_limited.expanded_width()==1920&&DockLayout::capacity(1920)>DockLayout::capacity(960),"only physical monitor width imposes overflow; larger screens fit more apps");
         DockMachine fast;fast.hold(Hold::Pointer,true,0);fast.tick(90);
         expect(fast.progress()==1&&!fast.needs_tick(),"expansion finishes in 90 ms");
@@ -139,16 +139,14 @@ int main() {
                 for(size_t i=0;i<opened.size();++i) {
                     if(keep) {
                         expect(updated.apps[i].side==baseline.apps[i].side&&
-                            updated.apps[i].expanded_rank==baseline.apps[i].expanded_rank,
+                            updated.apps[i].rank==baseline.apps[i].rank,
                             "balanced pin updates preserve every expanded slot");
-                        expect(layout.app_x(updated.apps[i],opened[i].running,1)==
-                            layout.app_x(baseline.apps[i],idle[i].running,1),
+                        expect(layout.app_x(updated.apps[i])==
+                            layout.app_x(baseline.apps[i]),
                             "balanced pin state updates cannot move an expanded icon");
                     }
-                    if(opened[i].running)expect(
-                        (layout.app_x(updated.apps[i],true,0)-layout.center)*
-                        (layout.app_x(updated.apps[i],true,1)-layout.center)>0,
-                        "stateful placements do not cross sides on hover");
+                    if(opened[i].running)expect((layout.app_x(updated.apps[i])<layout.center)==(updated.apps[i].side==0),
+                        "stateful placements keep the assigned app side");
                 }
                 if(opened.size()<=7) {
                     const auto cost=[&](const auto& sides) {
@@ -176,14 +174,12 @@ int main() {
             for(size_t i=0;i<extra;++i)apps.push_back({false,true});
             const auto placed=balance_apps(apps);
             expect(balanced(placed.pinned)&&balanced(placed.expanded)&&balanced(placed.running),"all pin/running combinations balance both views and pinned subset");
-            std::array<size_t,2> expanded_rank{},running_rank{};
+            std::array<size_t,2> ranks{};
             for(size_t i=0;i<apps.size();++i) {
                 const auto& slot=placed.apps[i];
-                expect(slot.expanded_rank==expanded_rank[slot.side]++&&slot.collapsed_rank==running_rank[slot.side],"ranks stay contiguous with pins inside unpinned running apps");
+                expect(slot.rank==ranks[slot.side]++,"fixed ranks stay contiguous with pins inside unpinned running apps");
                 if(apps[i].running) {
-                    ++running_rank[slot.side];
-                    const auto left=layout.app_x(slot,true,0)-layout.center,right=layout.app_x(slot,true,1)-layout.center;
-                    expect(left*right>0,"balanced layouts never send a running app across center");
+                    expect((layout.app_x(slot)<layout.center)==(slot.side==0),"balanced layouts preserve assigned running app sides");
                 }
             }
             expect(placed.expanded[0]+placed.expanded[1]==apps.size(),"running pins occupy only one expanded slot");

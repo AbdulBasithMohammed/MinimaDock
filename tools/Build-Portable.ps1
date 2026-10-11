@@ -11,10 +11,24 @@ try {
     if($LASTEXITCODE -ne 0){throw 'Model build failed.'}
     & .\build\portable\model_tests.exe
     if($LASTEXITCODE -ne 0){throw 'Model tests failed.'}
-    & $compiler @flags tests\integration\pin_state_tests.cpp src\windows\inventory.cpp src\taskbar\state_machine.cpp -ld2d1 -ldwrite -ldwmapi -lshell32 -lole32 -ladvapi32 -lwindowscodecs -luuid -lgdi32 -o build\portable\pin_state_tests.exe
+    & $compiler @flags tests\state_machines\calendar_tests.cpp -o build\portable\calendar_tests.exe
+    if($LASTEXITCODE -ne 0){throw 'Calendar model build failed.'}
+    & .\build\portable\calendar_tests.exe
+    if($LASTEXITCODE -ne 0){throw 'Calendar model tests failed.'}
+    & $compiler @flags tests\state_machines\media_marquee_tests.cpp -o build\portable\media_marquee_tests.exe
+    if($LASTEXITCODE -ne 0){throw 'Media marquee model build failed.'}
+    & .\build\portable\media_marquee_tests.exe
+    if($LASTEXITCODE -ne 0){throw 'Media marquee model tests failed.'}
+    & $compiler @flags tests\integration\pin_state_tests.cpp src\rendering\calendar.cpp src\windows\media.cpp src\windows\inventory.cpp src\taskbar\state_machine.cpp -ld2d1 -ldwrite -ldwmapi -lshell32 -lole32 -ladvapi32 -lwindowscodecs -luuid -lgdi32 -lruntimeobject -o build\portable\pin_state_tests.exe
     if($LASTEXITCODE -ne 0){throw 'Pinned-window regression build failed.'}
     & .\build\portable\pin_state_tests.exe
     if($LASTEXITCODE -ne 0){throw 'Pinned-window regression failed.'}
+    & $compiler @flags tests\integration\media_tests.cpp src\windows\media.cpp -lole32 -lshell32 -lruntimeobject -luuid -o build\portable\media_tests.exe
+    if($LASTEXITCODE -ne 0){throw 'Media fixture build failed.'}
+    & $compiler @flags tests\integration\media_ui_tests.cpp src\rendering\calendar.cpp src\windows\media.cpp src\windows\inventory.cpp src\taskbar\state_machine.cpp -ld2d1 -ldwrite -ldwmapi -lshell32 -lole32 -ladvapi32 -lwindowscodecs -luuid -lgdi32 -lruntimeobject -o build\portable\media_ui_tests.exe
+    if($LASTEXITCODE -ne 0){throw 'Media UI build failed.'}
+    & .\build\portable\media_ui_tests.exe
+    if($LASTEXITCODE -ne 0){throw 'Media UI tests failed.'}
     & $compiler @flags tests\integration\work_area_tests.cpp -ldwmapi -o build\portable\work_area_tests.exe
     if($LASTEXITCODE -ne 0){throw 'Work area test build failed.'}
     & .\build\portable\work_area_tests.exe
@@ -25,7 +39,7 @@ try {
     if($LASTEXITCODE -ne 0){throw 'Guard build failed.'}
     & $compiler @flags -municode -mwindows src\recovery\taskbar_trial.cpp -ladvapi32 -lshell32 -ldwmapi -o build\portable\MinimaDockTrial.exe
     if($LASTEXITCODE -ne 0){throw 'Taskbar trial build failed.'}
-    & $compiler @flags -municode -mwindows src\app\main.cpp src\rendering\preview.cpp src\windows\inventory.cpp src\taskbar\state_machine.cpp -ld2d1 -ldwrite -ldwmapi -lshell32 -lole32 -ladvapi32 -lwindowscodecs -luuid -o build\portable\MinimaDock.exe
+    & $compiler @flags -municode -mwindows src\app\main.cpp src\rendering\preview.cpp src\rendering\calendar.cpp src\windows\media.cpp src\windows\inventory.cpp src\taskbar\state_machine.cpp -ld2d1 -ldwrite -ldwmapi -lshell32 -lole32 -ladvapi32 -lwindowscodecs -luuid -lruntimeobject -o build\portable\MinimaDock.exe
     if($LASTEXITCODE -ne 0){throw 'Preview build failed.'}
     Write-Output 'Native x64 release build complete: build/portable'
 } finally { Pop-Location }

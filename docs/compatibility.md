@@ -13,7 +13,8 @@ Recorded on October 9, 2026 (America/New_York), Windows 11 Pro 25H2, build 26200
 | Explorer absent | No replacement performed | Mandatory isolated trial; no hidden Explorer workaround |
 | File browsing / This PC | Original shortcuts and ShellExecute semantics retained in preview | Ensure opening folders, This PC and Recycle Bin never revives taskbar after replacement |
 | Wallpaper Engine | Running `C:\Games\Steam\steamapps\common\wallpaper_engine\wallpaper64.exe` observed | Explorer-free stacking, input, startup and GPU cost unproven; user settings untouched |
-| Spotify | No Spotify process observed during initial inventory | Store/desktop installation and media-session capability not established; adapter pending |
+| Windows media sessions | Native silent SMTC fixture and current-session handoff checked | Shared controller reads title/artist/status and sends supported transport requests; participating players/browsers required |
+| Spotify | No Spotify process observed during initial inventory | Uses the general Windows media controller; specific Spotify installation remains untested |
 | Windows settings | Exact `ms-settings:network-wifi`, `bluetooth`, `sound` links | Links provided; real device toggles and audio callbacks pending |
 | Tray / toasts | No replacement tray implementation | Hosting/licensing spike mandatory; tray and notifications are separate gates |
 | Fullscreen | State-machine suppression cancels hover/animation | `F` is a simulation only; maximized versus borderless game classifier pending |

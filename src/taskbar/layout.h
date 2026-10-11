@@ -7,7 +7,7 @@
 
 namespace minima {
 struct DockApp { bool pinned, running; };
-struct AppPlacement { std::size_t side=0, expanded_rank=0, collapsed_rank=0; };
+struct AppPlacement { std::size_t side=0, rank=0; };
 struct BalancedApps {
     std::vector<AppPlacement> apps;
     std::array<std::size_t,2> expanded{}, running{}, pinned{};
@@ -83,19 +83,17 @@ inline BalancedApps balance_apps(const std::vector<DockApp>& apps,const std::vec
             }
         }
     }
-    std::array<std::size_t,2> expanded_rank{},running_rank{};
+    std::array<std::size_t,2> ranks{};
     for(std::size_t i=0;i<apps.size();++i) {
         auto& placement=result.apps[i];
-        placement.expanded_rank=expanded_rank[placement.side]++;
-        placement.collapsed_rank=running_rank[placement.side];
-        if(apps[i].running)++running_rank[placement.side];
+        placement.rank=ranks[placement.side]++;
     }
     return result;
 }
 // Logical pixels (DIPs). The launcher is the invariant origin for both sides.
 struct DockLayout {
     float center, center_y, available_width;
-    std::size_t expanded_apps, running_left, running_right;
+    std::size_t apps;
     static constexpr float button = 44, expanded_height = button, pitch = 40, utility_width = 156, desktop_width = 14;
     static float natural_expanded_width(std::size_t apps) { return button+2*(static_cast<float>((apps+1)/2)*pitch+utility_width+20+desktop_width); }
     static std::size_t capacity(float available) {
@@ -103,13 +101,9 @@ struct DockLayout {
         return static_cast<std::size_t>(std::max(1.0f,std::floor(space/(2*pitch))))*2;
     }
     static float offset(std::size_t index) { return (index % 2 == 0 ? -1.0f : 1.0f) * (button/2 + 14 + static_cast<float>(index/2)*pitch); }
-    float app_x(const AppPlacement& placement, bool running, float p) const {
-        const auto expanded = offset(placement.expanded_rank*2+placement.side);
-        const auto collapsed = running ? offset(placement.collapsed_rank*2+placement.side) : expanded;
-        return center + collapsed + (expanded-collapsed)*p;
-    }
-    float collapsed_width() const { const auto wings=std::max(running_left,running_right);return wings?button+2*(static_cast<float>(wings)*pitch+desktop_width-2):button+2*(desktop_width+4); }
-    float expanded_width() const { return std::min(available_width,natural_expanded_width(expanded_apps)); }
+    float app_x(const AppPlacement& placement) const { return center+offset(placement.rank*2+placement.side); }
+    float collapsed_width() const { const auto wings=(apps+1)/2;return wings?button+2*(static_cast<float>(wings)*pitch+desktop_width-2):button+2*(desktop_width+4); }
+    float expanded_width() const { return std::min(available_width,natural_expanded_width(apps)); }
     float width(float p) const { return collapsed_width()+(expanded_width()-collapsed_width())*p; }
     float height(float) const { return button; }
 };

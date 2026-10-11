@@ -1,10 +1,13 @@
 #include "rendering/preview.h"
+#include "rendering/calendar.h"
 #include "rendering/theme.h"
 #include "rendering/launcher_logo.h"
 #include "taskbar/state_machine.h"
 #include "taskbar/layout.h"
+#include "taskbar/media_marquee.h"
 #include "windows/inventory.h"
 #include "windows/window_state.h"
+#include "windows/media.h"
 #include "platform/com_ptr.h"
 #include <dwrite.h>
 #include <dwmapi.h>
@@ -28,12 +31,14 @@
 namespace minima {
 namespace {
 constexpr UINT inventory_ready = WM_APP + 1, windows_changed = WM_APP + 2, visibility_changed=WM_APP+3;
-constexpr UINT_PTR frame_timer = 1, reconcile_timer = 2, clock_timer = 3;
+constexpr UINT foreground_changed=WM_APP+4;
+constexpr UINT_PTR frame_timer = 1, reconcile_timer = 2, clock_timer = 3, media_title_timer=4;
 HWND event_target = nullptr;
 std::atomic_bool event_queued=false;
 std::atomic_bool visibility_queued=false;
-void CALLBACK window_event(HWINEVENTHOOK, DWORD event, HWND window, LONG object, LONG child, DWORD, DWORD) {
+void CALLBACK window_event(HWINEVENTHOOK, DWORD event, HWND window, LONG object, LONG child, DWORD, DWORD event_time) {
     if(!event_target||!window||child!=CHILDID_SELF||(object!=OBJID_WINDOW&&event!=EVENT_SYSTEM_FOREGROUND))return;
+    if(event==EVENT_SYSTEM_FOREGROUND)PostMessageW(event_target,foreground_changed,reinterpret_cast<WPARAM>(window),event_time);
     if(event==EVENT_OBJECT_LOCATIONCHANGE) {
         if(window==GetForegroundWindow()&&!visibility_queued.exchange(true))PostMessageW(event_target,visibility_changed,0,0);
         return;
@@ -60,7 +65,7 @@ std::string json_text(const std::wstring& value) {
 }
 bool inside(D2D1_RECT_F r, float x, float y) { return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }
 struct Group { std::wstring name, initial, executable; std::vector<HWND> windows; std::wstring launch_path; NativeIcon icon; bool pinned=false; std::wstring app_id; ClickPulse pulse{}; bool pressed=false; };
-enum class Panel { None, Launcher, Settings, Tray };
+enum class Panel { None, Launcher, Settings, Tray, Calendar };
 
 class Scene {
 public:
@@ -71,9 +76,14 @@ public:
     ComPtr<IWICImagingFactory> wic;
     ComPtr<ID2D1BitmapBrush> backdrop;
     ComPtr<ID2D1LinearGradientBrush> material, sheen;
-    ComPtr<ID2D1PathGeometry> launcher_mark;
+    ComPtr<ID2D1PathGeometry> launcher_mark,media_play_mark;
     ComPtr<ID2D1Layer> panel_layer;
-    ClickPulse launcher_pulse,tray_pulse,settings_pulse;
+    ClickPulse launcher_pulse,tray_pulse,settings_pulse,clock_pulse;
+    std::array<ClickPulse,3> media_pulses;
+    MediaSnapshot media;
+    MediaMarquee media_marquee;
+    ComPtr<IDWriteTextLayout> media_title;
+    std::wstring media_title_text;
     PanelReveal panel_reveal;
     struct IconBitmap { NativeIcon source;ComPtr<ID2D1Bitmap> bitmap; };
     std::vector<std::shared_ptr<IconBitmap>> app_icons, desktop_icons;
@@ -106,19 +116,19 @@ public:
             logo_sink->EndFigure(D2D1_FIGURE_END_CLOSED);
         }
         check(logo_sink->Close());
+        check(factory->CreatePathGeometry(media_play_mark.put()));
+        ComPtr<ID2D1GeometrySink> play_sink;check(media_play_mark->Open(play_sink.put()));
+        play_sink->BeginFigure(D2D1::Point2F(-3,-4.5f),D2D1_FIGURE_BEGIN_FILLED);
+        play_sink->AddLine(D2D1::Point2F(4,0));play_sink->AddLine(D2D1::Point2F(-3,4.5f));
+        play_sink->EndFigure(D2D1_FIGURE_END_CLOSED);check(play_sink->Close());
         check(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(write.put())));
         check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(wic.put())));
         ComPtr<IDWriteFontCollection> collection;check(write->GetSystemFontCollection(collection.put()));
-        UINT family_index=0;BOOL variable_available=FALSE;
-        check(collection->FindFamilyName(L"Segoe UI Variable Text",&family_index,&variable_available));
-        const auto ui_family=variable_available?L"Segoe UI Variable Text":L"Segoe UI";
-        BOOL clock_family_available=FALSE;
-        check(collection->FindFamilyName(L"Bahnschrift",&family_index,&clock_family_available));
-        const auto clock_family=clock_family_available?L"Bahnschrift":ui_family;
+        const auto ui_family=theme::text_family(collection.get());
         const float sizes[] = {11, 13, 16, 28, 40, 18, 12, 12};
         for (size_t i = 0; i < fonts.size(); ++i) {
-            const auto weight=i>=6?DWRITE_FONT_WEIGHT_LIGHT:(i==3||i==4?DWRITE_FONT_WEIGHT_SEMI_BOLD:DWRITE_FONT_WEIGHT_NORMAL);
-            check(write->CreateTextFormat(i==5?L"Segoe Fluent Icons":(i>=6?clock_family:ui_family), nullptr, weight,
+            const auto weight=i==5?DWRITE_FONT_WEIGHT_NORMAL:DWRITE_FONT_WEIGHT_LIGHT;
+            check(write->CreateTextFormat(i==5?L"Segoe Fluent Icons":ui_family, nullptr, weight,
                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, sizes[i], L"en-us", fonts[i].put()));
             fonts[i]->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             fonts[i]->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -203,11 +213,11 @@ public:
         check(target->CreateBitmapBrush(bitmap.get(),backdrop.put()));
         backdrop->SetTransform(D2D1::Matrix3x2F::Scale(width/bw,height/bh));
         }
-        D2D1_GRADIENT_STOP stops[]={{0,theme::rgb(0x888888,.30f)},{.35f,theme::glass()},{.8f,theme::rgb(0x080808,.84f)},{1,theme::rgb(0x343434,.60f)}};
-        ComPtr<ID2D1GradientStopCollection> collection; check(target->CreateGradientStopCollection(stops,4,collection.put()));
+        const auto stops=theme::material_stops();
+        ComPtr<ID2D1GradientStopCollection> collection; check(target->CreateGradientStopCollection(stops.data(),static_cast<UINT32>(stops.size()),collection.put()));
         check(target->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),D2D1::Point2F(0,48)),collection.get(),material.put()));
-        D2D1_GRADIENT_STOP highlights[]={{0,theme::rgb(0xffffff,.16f)},{.5f,theme::rgb(0xffffff,.02f)},{1,theme::rgb(0xffffff,0)}};
-        check(target->CreateGradientStopCollection(highlights,3,collection.put()));
+        const auto highlights=theme::sheen_stops();
+        check(target->CreateGradientStopCollection(highlights.data(),static_cast<UINT32>(highlights.size()),collection.put()));
         check(target->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),D2D1::Point2F(0,24)),collection.get(),sheen.put()));
         cache_width=width;cache_height=height;
     }
@@ -240,6 +250,21 @@ public:
     void line(float x1, float y1, float x2, float y2, D2D1_COLOR_F c, float stroke=1) {
         color(c); target->DrawLine(D2D1::Point2F(x1,y1),D2D1::Point2F(x2,y2),brush.get(),stroke);
     }
+    void media_symbol(size_t index,D2D1_RECT_F button,D2D1_COLOR_F ink) {
+        const auto x=(button.left+button.right)/2,y=(button.top+button.bottom)/2;
+        D2D1_MATRIX_3X2_F saved;target->GetTransform(&saved);
+        target->SetTransform(D2D1::Matrix3x2F::Scale(1.5f,1.5f)*D2D1::Matrix3x2F::Translation(x,y)*saved);
+        if(index==1) {
+            if(media.playing){line(-2,-4,-2,4,ink,1.2f);line(2,-4,2,4,ink,1.2f);}
+            else {color(ink);target->FillGeometry(media_play_mark.get(),brush.get());}
+        } else {
+            const float direction=index==0?-1.0f:1.0f;
+            line(-3*direction,-4,2*direction,0,ink,.9f);
+            line(2*direction,0,-3*direction,4,ink,.9f);
+            line(5*direction,-4,5*direction,4,ink,.9f);
+        }
+        target->SetTransform(saved);
+    }
     size_t shown_groups() const {
         return std::min(groups.size(),DockLayout::capacity(width-40));
     }
@@ -255,17 +280,29 @@ public:
             for(size_t i=0;i<apps.size();++i)previous_sides.push_back(i<placements.apps.size()?placements.apps[i].side:2);
         placements=balance_apps(apps,previous_sides);
     }
-    DockLayout layout() const { return {width/2,height-34,width-40,shown_groups(),placements.running[0],placements.running[1]}; }
-    float app_x(size_t index) const { return layout().app_x(placements.apps[index],tile_running(index),machine.progress()); }
+    DockLayout layout() const { return {width/2,height-34,width-40,shown_groups()}; }
+    float app_x(size_t index) const { return layout().app_x(placements.apps[index]); }
     D2D1_RECT_F app_rect(size_t i) const { const auto x=app_x(i),y=layout().center_y;return D2D1::RectF(x-18,y-19,x+18,y+19); }
     D2D1_RECT_F launcher_rect() const { const auto y=layout().center_y;return D2D1::RectF(width/2-22,y-22,width/2+22,y+22); }
     D2D1_RECT_F dock() const {
         const auto l=layout();const auto p=machine.progress(),w=l.width(p),h=l.height(p);
         return D2D1::RectF(l.center-w/2,l.center_y-h/2,l.center+w/2,l.center_y+h/2);
     }
-    D2D1_RECT_F spotify_rect() const { const auto l=layout();return D2D1::RectF(l.center-l.expanded_width()/2+12,l.center_y-18,l.center-l.expanded_width()/2+160,l.center_y+18); }
+    D2D1_RECT_F media_rect() const { const auto l=layout();return D2D1::RectF(l.center-l.expanded_width()/2+12,l.center_y-18,l.center-l.expanded_width()/2+160,l.center_y+18); }
+    D2D1_RECT_F media_button(size_t index) const {const auto r=media_rect();const auto x=(r.left+r.right)/2+(static_cast<float>(index)-1)*40;return D2D1::RectF(x-16,r.top+19,x+16,r.bottom+1);}
+    void measure_media_title() {
+        const auto label=media.available?media.title:(media.unavailable?L"Media unavailable":L"No media");
+        if(media_title&&media_title_text==label)return;
+        media_title_text=label;media_title.reset();
+        check(write->CreateTextLayout(label.data(),static_cast<UINT32>(label.size()),fonts[6].get(),16384,17,media_title.put()));
+        DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_NONE,0,0};media_title->SetTrimming(&trimming,nullptr);media_title->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        DWRITE_TEXT_METRICS metrics{};check(media_title->GetMetrics(&metrics));
+        const auto r=media_rect();media_marquee.configure(media.available?metrics.widthIncludingTrailingWhitespace-(r.right-r.left):0);
+    }
+    bool media_enabled(size_t index) const {return media.available&&(index==0?media.previous:index==1?media.toggle:media.next);}
     D2D1_RECT_F system_rect() const { const auto l=layout();return D2D1::RectF(l.center+l.expanded_width()/2-166-DockLayout::desktop_width,l.center_y-20,l.center+l.expanded_width()/2-10-DockLayout::desktop_width,l.center_y+20); }
     D2D1_RECT_F quick_settings_rect() const { const auto s=system_rect();const auto cy=layout().center_y;return D2D1::RectF(s.left+24,cy-19,s.left+77,cy+19); }
+    D2D1_RECT_F clock_rect() const { const auto s=system_rect();const auto cy=layout().center_y;return D2D1::RectF(s.left+81,cy-19,s.right,cy+19); }
     D2D1_RECT_F desktop_button_rect() const {
         const auto r=dock();const auto cy=layout().center_y;
         return D2D1::RectF(r.right-4-DockLayout::desktop_width,cy-13,r.right-4,cy+13);
@@ -279,21 +316,24 @@ public:
     void press_at(float x,float y) {
         clear_press();if(!inside(dock(),x,y))return;
         if(inside(launcher_rect(),x,y)){pressed=true;return;}
-        for(size_t i=0;i<shown_groups();++i)if((tile_running(i)||machine.progress()>.85f)&&inside(app_rect(i),x,y)){groups[i].pressed=true;return;}
+        for(size_t i=0;i<shown_groups();++i)if(inside(app_rect(i),x,y)){groups[i].pressed=true;return;}
     }
     size_t active_pulses() const {
-        size_t count=launcher_pulse.active()+tray_pulse.active()+settings_pulse.active();
+        size_t count=launcher_pulse.active()+tray_pulse.active()+settings_pulse.active()+clock_pulse.active();
         for(const auto& g:groups)if(g.pulse.active())++count;
+        for(const auto& pulse:media_pulses)if(pulse.active())++count;
         return count;
     }
     bool feedback_moving() const{return active_pulses()!=0||panel_reveal.active();}
     void tick_feedback(DockMachine::Time time) {
-        launcher_pulse.tick(time);tray_pulse.tick(time);settings_pulse.tick(time);panel_reveal.tick(time);
+        launcher_pulse.tick(time);tray_pulse.tick(time);settings_pulse.tick(time);clock_pulse.tick(time);panel_reveal.tick(time);
         for(auto& g:groups)g.pulse.tick(time);
+        for(auto& pulse:media_pulses)pulse.tick(time);
     }
     void stop_feedback() {
-        launcher_pulse.stop();tray_pulse.stop();settings_pulse.stop();panel_reveal.settle();
+        launcher_pulse.stop();tray_pulse.stop();settings_pulse.stop();clock_pulse.stop();panel_reveal.settle();
         for(auto& g:groups)g.pulse.stop();clear_press();
+        for(auto& pulse:media_pulses)pulse.stop();
     }
     void bubble(float x,float y,const ClickPulse& pulse,float opacity=1) {
         if(!pulse.active())return;
@@ -414,8 +454,7 @@ public:
             constexpr unsigned colors[]={0x758bbb,0x618e7f,0xb39b78,0x9290b9};
             target->PushAxisAlignedClip(D2D1::RectF(r.left+3,r.top,r.right-3,r.bottom),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             for(size_t i=0;i<shown_groups();++i) {
-                const float opacity=tile_running(i)?1:p;
-                if(opacity<=.01f)continue;
+                constexpr float opacity=1;
                 const auto button=app_rect(i);const auto x=app_x(i);
                 const bool over=inside(button,pointer_x,pointer_y);
                 if(over) rect(button,theme::rgb(0xffffff,.06f),16);
@@ -433,7 +472,7 @@ public:
                 if(focus==static_cast<int>(i)+1) outline(button,theme::accent(),14,1.5f);
             }
             if(p>.01f) {
-                const auto music=spotify_rect(),system=system_rect();
+                const auto music=media_rect(),system=system_rect();
                 const auto quick_settings=quick_settings_rect();
                 const bool tray_over=inside(D2D1::RectF(system.left,cy-19,system.left+24,cy+19),pointer_x,pointer_y);
                 const bool settings_over=inside(quick_settings,pointer_x,pointer_y);
@@ -450,19 +489,31 @@ public:
                     text(system_symbols[i],D2D1::RectF(x-11,cy-17-lift,x+11,cy+17-lift),5,theme::rgb(0xe1e9f0,p),true);
                 }
                 line(music.right+6,cy-12,music.right+6,cy+12,theme::rgb(0xffffff,.13f*p));
-                rect(D2D1::RectF(music.left,music.top+6,music.left+24,music.bottom-6),theme::rgb(0x264e40,p),8);
-                text(L"\xE8D6",D2D1::RectF(music.left,music.top,music.left+24,music.bottom),5,theme::rgb(0xc1e4cb,p),true);
-                text(L"Spotify",D2D1::RectF(music.left+32,music.top-2,music.right,music.top+17),0,theme::rgb(0xf2f4fa,p));
-                text(L"\xE892  \xE768  \xE893",D2D1::RectF(music.left+32,music.top+15,music.right,music.bottom+1),5,theme::rgb(0x8998a7,p*.65f));
+                measure_media_title();
+                const auto title_area=D2D1::RectF(music.left,music.top,music.right,music.top+17);
+                if(reduced)text(media_title_text,title_area,6,theme::rgb(0xf2f4fa,p));
+                else {target->PushAxisAlignedClip(title_area,D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);color(theme::rgb(0xf2f4fa,p));target->DrawTextLayout(D2D1::Point2F(music.left-media_marquee.offset(),music.top),media_title.get(),brush.get());target->PopAxisAlignedClip();}
+                for(size_t i=0;i<3;++i) {
+                    auto button=media_button(i);const bool enabled=media_enabled(i),over=enabled&&inside(button,pointer_x,pointer_y);
+                    bubble((button.left+button.right)/2,(button.top+button.bottom)/2,media_pulses[i],p*.45f);
+                    const auto lift=over&&!reduced?1.0f:0.0f;button.top-=lift;button.bottom-=lift;
+                    media_symbol(i,button,theme::rgb(0xf2f2f2,p*(enabled?(over||high_contrast?1.0f:.82f):(high_contrast?.50f:.28f))));
+                    if(focus==static_cast<int>(shown_groups())+5+static_cast<int>(i))outline(media_button(i),theme::accent(),8,1.5f);
+                }
                 line(system.left-6,cy-12,system.left-6,cy+12,theme::rgb(0xffffff,.13f*p));
-                text(clock_time,D2D1::RectF(system.left+81,cy-17,system.right,cy+1),6,theme::rgb(0xf2f4fa,p),true);
-                text(clock_date,D2D1::RectF(system.left+81,cy+1,system.right,cy+18),7,theme::rgb(0xf2f4fa,p),true);
+                const auto clock=clock_rect();const bool clock_over=inside(clock,pointer_x,pointer_y);
+                if(clock_over)rect(clock,theme::rgb(0xffffff,.06f*p),16);
+                bubble((clock.left+clock.right)/2,cy,clock_pulse,p);
+                const float clock_lift=clock_over&&!reduced?2.0f:0.0f;
+                text(clock_time,D2D1::RectF(clock.left,cy-17-clock_lift,clock.right,cy+1-clock_lift),6,theme::rgb(0xf2f4fa,p),true);
+                text(clock_date,D2D1::RectF(clock.left,cy+1-clock_lift,clock.right,cy+18-clock_lift),7,theme::rgb(0xf2f4fa,p),true);
                 if(focus==static_cast<int>(shown_groups())+1)outline(D2D1::RectF(system.left,system.top,system.left+23,system.bottom),theme::accent(),10,1.5f);
                 if(focus==static_cast<int>(shown_groups())+2)outline(quick_settings,theme::accent(),14,1.5f);
+                if(focus==static_cast<int>(shown_groups())+3)outline(clock,theme::accent(),14,1.5f);
             }
             const auto show_desktop=desktop_button_rect();
             const bool desktop_over=inside(show_desktop,pointer_x,pointer_y);
-            const bool desktop_focused=focus==static_cast<int>(shown_groups())+3;
+            const bool desktop_focused=focus==static_cast<int>(shown_groups())+4;
             // A slim separator at the outer edge, like the native taskbar.
             // Hover brightens the edge instead of drawing a floating button box.
             const auto separator=show_desktop.left+3;
@@ -475,9 +526,24 @@ public:
                 outline(tooltip,theme::rgb(0xffffff,.14f),5);
                 text(L"Show desktop",tooltip,0,theme::primary(),true);
             }
+            const auto media_area=media_rect();
+            if(media.available&&p>.85f)for(size_t i=0;i<3;++i)if(!media_enabled(i)&&inside(media_button(i),pointer_x,pointer_y)) {
+                const auto tooltip=D2D1::RectF(media_area.left,cy-52,std::min(width-20,media_area.left+300),cy-26);
+                const wchar_t* unavailable[]={L"Previous track unavailable in this player",L"Playback control unavailable in this player",L"Next track unavailable in this player"};
+                rect(tooltip,theme::rgb(0x202020,.97f),5);outline(tooltip,theme::rgb(0xffffff,.14f),5);text(unavailable[i],D2D1::RectF(tooltip.left+8,tooltip.top,tooltip.right-8,tooltip.bottom),6,theme::primary());
+            }
+            if(media.available&&media.toggle&&p>.85f&&inside(media_button(1),pointer_x,pointer_y)) {
+                const auto center=(media_button(1).left+media_button(1).right)/2;
+                const auto tooltip=D2D1::RectF(center-28,cy-52,center+28,cy-26);
+                rect(tooltip,theme::rgb(0x202020,.97f),5);outline(tooltip,theme::rgb(0xffffff,.14f),5);text(media.playing?L"Pause":L"Play",tooltip,6,theme::primary(),true);
+            }
+            if(media.available&&!media.artist.empty()&&p>.85f&&inside(D2D1::RectF(media_area.left,media_area.top,media_area.right,media_area.top+17),pointer_x,pointer_y)) {
+                const auto tooltip=D2D1::RectF(media_area.left,cy-52,std::min(width-20,media_area.left+360),cy-26);
+                rect(tooltip,theme::rgb(0x202020,.97f),5);outline(tooltip,theme::rgb(0xffffff,.14f),5);text(media.artist,D2D1::RectF(tooltip.left+8,tooltip.top,tooltip.right-8,tooltip.bottom),6,theme::primary());
+            }
         } else if(!desktop) text(L"Overlay suppressed — press F to return",D2D1::RectF(0,height-100,width,height-50),2,theme::secondary(),true);
 
-        if(panel != Panel::None && machine.visible()) {
+        if(panel != Panel::None && panel != Panel::Calendar && machine.visible()) {
             const auto r=panel_rect();
             const bool fading=panel_reveal.active();
             if(fading)target->PushLayer(D2D1::LayerParameters(
@@ -540,6 +606,10 @@ public:
 class Preview {
 public:
     Scene scene;
+    CalendarPopup calendar;
+    MediaController media;
+    DWORD calendar_opened=0;
+    HWND calendar_previous=nullptr;
     HWND hwnd=nullptr, search=nullptr;
     ComPtr<ID2D1HwndRenderTarget> render;
     ComPtr<IWICBitmap> layer_bitmap;
@@ -558,7 +628,7 @@ public:
     std::mutex mutex;
     std::unique_ptr<Inventory> pending;
     std::atomic_bool busy=false;
-    bool pending_full=false, rescan=false, tracking=false, animation_timer=false, reconcile_scheduled=false;
+    bool pending_full=false, rescan=false, tracking=false, animation_timer=false, reconcile_scheduled=false, media_timer=false;
     std::array<HWINEVENTHOOK,5> hooks{};
     DockVisibility visibility;
     HWND edge=nullptr,last_foreground=nullptr;
@@ -637,7 +707,7 @@ public:
         if(GetCursorPos(&p)&&ScreenToClient(hwnd,&p)) {
             const float x=p.x*96.0f/dpi,y=p.y*96.0f/dpi;
             const auto r=scene.dock();
-            over=visibility.wanted()&&(inside(r,x,y)||inside(r,x,y-visibility.offset())||(scene.panel!=Panel::None&&inside(scene.panel_rect(),x,y)));
+            over=visibility.wanted()&&(inside(r,x,y)||inside(r,x,y-visibility.offset())||(scene.panel!=Panel::None&&scene.panel!=Panel::Calendar&&inside(scene.panel_rect(),x,y)));
             scene.pointer_x=x;scene.pointer_y=y-visibility.offset();
         }
         scene.machine.hold(Hold::Pointer,over||edge_tracking,now());
@@ -680,7 +750,7 @@ public:
         const float scale=dpi/96;
         const auto desired=DockLayout::natural_expanded_width(scene.groups.size())+40;
         const auto w=std::min(info.rcMonitor.right-info.rcMonitor.left,static_cast<LONG>(std::ceil(desired*scale)));
-        const auto h=std::min(info.rcMonitor.bottom-info.rcMonitor.top,static_cast<LONG>((scene.panel==Panel::None?88:440)*scale));
+        const auto h=std::min(info.rcMonitor.bottom-info.rcMonitor.top,static_cast<LONG>((scene.panel==Panel::None||scene.panel==Panel::Calendar?88:440)*scale));
         // Keep the currently displayed bitmap in place until its replacement is
         // ready. UpdateLayeredWindow commits destination, size and pixels together.
         const auto left=info.rcMonitor.left+(info.rcMonitor.right-info.rcMonitor.left-w)/2;
@@ -699,7 +769,9 @@ public:
         if(!live_dock)return;
         auto foreground=GetForegroundWindow();RECT bounds{};MONITORINFO info{sizeof(info),{},{},0};
         DWORD owner=0;GetWindowThreadProcessId(foreground,&owner);
-        if(owner==GetCurrentProcessId())foreground=last_foreground;else last_foreground=foreground;
+        // Activation can briefly report no foreground while an owned popup closes.
+        // Retain the application used for visibility and focus return through it.
+        if(!foreground||owner==GetCurrentProcessId())foreground=last_foreground;else last_foreground=foreground;
         owner=0;GetWindowThreadProcessId(foreground,&owner);
         const auto monitor=MonitorFromWindow(hwnd,MONITOR_DEFAULTTOPRIMARY);
         wchar_t klass[128]{};GetClassNameW(foreground,klass,128);
@@ -707,7 +779,7 @@ public:
         const bool covers=foreground&&owner!=GetCurrentProcessId()&&!desktop&&!IsIconic(foreground)&&!IsZoomed(foreground)&&
             MonitorFromWindow(foreground,MONITOR_DEFAULTTOPRIMARY)==monitor&&GetWindowRect(foreground,&bounds)&&GetMonitorInfoW(monitor,&info)&&
             bounds.left<=info.rcMonitor.left&&bounds.top<=info.rcMonitor.top&&bounds.right>=info.rcMonitor.right&&bounds.bottom>=info.rcMonitor.bottom;
-        if(covers) set_panel(Panel::None);
+        if(covers) {calendar.close(false);set_panel(Panel::None);scene.stop_feedback();}
         auto_hidden=foreground&&!desktop&&IsWindowVisible(foreground)&&!IsIconic(foreground)&&
             (IsZoomed(foreground)||window_arranged(foreground))&&MonitorFromWindow(foreground,MONITOR_DEFAULTTOPRIMARY)==monitor;
         scene.machine.suppress(covers,now());
@@ -733,6 +805,10 @@ public:
     }
     void schedule() {
         sync_visibility();
+        scene.measure_media_title();
+        scene.media_marquee.visible(scene.machine.state()==DockState::Expanded&&visibility.progress()>.99f&&scene.panel==Panel::None,scene.reduced,now());
+        if(scene.media_marquee.active()&&!media_timer)media_timer=SetTimer(hwnd,media_title_timer,33,nullptr)!=0;
+        else if(!scene.media_marquee.active()&&media_timer){KillTimer(hwnd,media_title_timer);media_timer=false;}
         const bool moving=scene.machine.needs_tick()||visibility.needs_tick()||scene.feedback_moving();
         if(moving&&!animation_timer) animation_timer=SetTimer(hwnd,frame_timer,10,nullptr)!=0;
         else if(!moving&&animation_timer) { KillTimer(hwnd,frame_timer); animation_timer=false; }
@@ -745,6 +821,7 @@ public:
         scene.machine.reduced_motion(scene.reduced);
         if(scene.reduced)scene.stop_feedback();
         visibility.reduced_motion(scene.reduced);
+        calendar.preferences(scene.reduced);
         DWORD enabled=1,size=sizeof(enabled);
         if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",L"EnableTransparency",RRF_RT_REG_DWORD,nullptr,&enabled,&size)==ERROR_SUCCESS)scene.transparency=enabled!=0;
     }
@@ -763,9 +840,14 @@ public:
     }
     void set_panel(Panel p) {
         const bool changed=scene.panel!=p;
+        if(changed&&p==Panel::Calendar) {
+            calendar_opened=GetTickCount();const auto foreground=GetForegroundWindow();DWORD pid=0;GetWindowThreadProcessId(foreground,&pid);
+            calendar_previous=foreground&&pid!=GetCurrentProcessId()?foreground:last_foreground;
+        }
         scene.panel=p;
+        if(p!=Panel::Calendar)calendar.close(scene.machine.visible());
         if(changed) {
-            if(p==Panel::None)scene.panel_reveal.settle();
+            if(p==Panel::None||p==Panel::Calendar)scene.panel_reveal.settle();
             else scene.panel_reveal.start(now(),scene.reduced||!scene.desktop);
         }
         if(changed&&scene.desktop)desktop_position();
@@ -775,6 +857,11 @@ public:
         else { ShowWindow(search,SW_HIDE); if(GetFocus()==search) SetFocus(hwnd); }
         schedule();
         if(changed&&scene.desktop&&layer_presented)paint_layer();
+        if(changed&&p==Panel::Calendar) {
+            const auto r=scene.clock_rect();POINT origin{};ClientToScreen(hwnd,&origin);const auto scale=dpi/96;
+            const RECT anchor{origin.x+static_cast<LONG>(std::lround(r.left*scale)),origin.y+static_cast<LONG>(std::lround(r.top*scale)),origin.x+static_cast<LONG>(std::lround(r.right*scale)),origin.y+static_cast<LONG>(std::lround(r.bottom*scale))};
+            calendar.open(hwnd,anchor,scene.reduced);
+        }
     }
     void layout_search() {
         const auto r=scene.panel_rect(); const float scale=dpi/96;
@@ -812,17 +899,25 @@ public:
         if(!scene.machine.visible())return;
         const auto time=now();
         const auto count=static_cast<int>(scene.shown_groups());
+        if(index>=count+5&&index<=count+7) {
+            const auto control=static_cast<size_t>(index-count-5);
+            const auto command=control==1?(scene.media.playing?MediaCommand::Pause:MediaCommand::Play):static_cast<MediaCommand>(control);
+            if(scene.media_enabled(control)&&media.command(command,scene.media)){scene.media_pulses[control].start(time,scene.reduced);schedule();}
+            return;
+        }
         if(index==0)scene.launcher_pulse.start(time,scene.reduced);
         else if(index>0&&index<=count)scene.groups[static_cast<size_t>(index-1)].pulse.start(time,scene.reduced);
         else if(index==count+1)scene.tray_pulse.start(time,scene.reduced);
         else if(index==count+2)scene.settings_pulse.start(time,scene.reduced);
+        else if(index==count+3)scene.clock_pulse.start(time,scene.reduced);
         schedule();
         if(scene.desktop&&layer_presented)paint_layer();
         if(index==0) { set_panel(scene.panel==Panel::Launcher?Panel::None:Panel::Launcher); return; }
         if(index<=count&&index>0) { const auto group=static_cast<size_t>(index-1);if(scene.overflow(group))overflow_menu();else group_action(group); }
         else if(index==count+1) set_panel(scene.panel==Panel::Tray?Panel::None:Panel::Tray);
         else if(index==count+2) set_panel(scene.panel==Panel::Settings?Panel::None:Panel::Settings);
-        else if(index==count+3) {
+        else if(index==count+3) set_panel(scene.panel==Panel::Calendar?Panel::None:Panel::Calendar);
+        else if(index==count+4) {
             set_panel(Panel::None);scene.focus=-1;scene.machine.hold(Hold::Keyboard,false,now());
             desktop_action_result=toggle_desktop();
             if(FAILED(desktop_action_result)) {
@@ -834,7 +929,7 @@ public:
     }
     void click(float x,float y) {
         if(!scene.machine.visible()) return;
-        if(scene.panel!=Panel::None) {
+        if(scene.panel!=Panel::None&&scene.panel!=Panel::Calendar) {
             const auto r=scene.panel_rect();
             if(inside(r,x,y)) {
                 if(scene.panel==Panel::Launcher) {
@@ -862,10 +957,18 @@ public:
         }
         const auto r=scene.dock();
         if(inside(r,x,y)) {
-            if(inside(scene.desktop_button_rect(),x,y)){action(static_cast<int>(scene.shown_groups())+3);return;}
+            if(inside(scene.desktop_button_rect(),x,y)){action(static_cast<int>(scene.shown_groups())+4);return;}
             if(inside(scene.launcher_rect(),x,y)) {action(0);return;}
-            for(size_t i=0;i<scene.shown_groups();++i)if((scene.tile_running(i)||scene.machine.progress()>.85f)&&inside(scene.app_rect(i),x,y)){action(static_cast<int>(i)+1);return;}
-            if(scene.machine.progress()>.85f&&inside(scene.system_rect(),x,y)) { const auto s=scene.system_rect();action(static_cast<int>(scene.shown_groups())+(x<s.left+24?1:2)); }
+            for(size_t i=0;i<scene.shown_groups();++i)if(inside(scene.app_rect(i),x,y)){action(static_cast<int>(i)+1);return;}
+            if(scene.machine.progress()>.01f&&inside(scene.media_rect(),x,y)) {
+                for(size_t i=0;i<3;++i)if(inside(scene.media_button(i),x,y)){action(static_cast<int>(scene.shown_groups())+5+static_cast<int>(i));return;}
+            }
+            if(scene.machine.progress()>.85f&&inside(scene.system_rect(),x,y)) {
+                const auto s=scene.system_rect();const auto count=static_cast<int>(scene.shown_groups());
+                if(x<s.left+24)action(count+1);
+                else if(inside(scene.quick_settings_rect(),x,y))action(count+2);
+                else if(inside(scene.clock_rect(),x,y))action(count+3);
+            }
         }
     }
     void paint() {
@@ -946,7 +1049,8 @@ public:
             search=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|ES_AUTOHSCROLL,0,0,0,0,hwnd,reinterpret_cast<HMENU>(101),nullptr,nullptr);
             edit_background=CreateSolidBrush(RGB(20,27,37));
             SendMessageW(search,EM_SETLIMITTEXT,120,0); SendMessageW(search,EM_SETCUEBANNER,FALSE,reinterpret_cast<LPARAM>(L"Search installed shortcuts"));
-            search_font=CreateFontW(-static_cast<int>(16*dpi/96),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+            wchar_t family[64]{};scene.fonts[0]->GetFontFamilyName(family,64);
+            search_font=CreateFontW(-static_cast<int>(16*dpi/96),0,0,0,FW_LIGHT,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,family);
             SendMessageW(search,WM_SETFONT,reinterpret_cast<WPARAM>(search_font),TRUE);
             event_queued=false;visibility_queued=false;event_target=hwnd;
             hooks[0]=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,nullptr,window_event,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
@@ -958,6 +1062,7 @@ public:
                 create_edge();visibility.reduced_motion(true);fullscreen();visibility.reduced_motion(scene.reduced);
             }
             SetTimer(hwnd,clock_timer,60000,nullptr);
+            media.start(hwnd);
             scan(true); return 0;
         }
         case WM_APP+40: return layer_presented&&inventory_loaded?1:0;
@@ -986,6 +1091,25 @@ public:
         case WM_APP+62: return static_cast<LRESULT>(scene.panel_reveal.offset()*1000);
         case WM_APP+63: return scene.pressed?1:0;
         case WM_APP+64: return scene.reduced?1:0;
+        case WM_APP+65: {const auto r=scene.clock_rect();return static_cast<LRESULT>((r.left+r.right)*500);}
+        case WM_APP+66:return reinterpret_cast<LRESULT>(last_foreground);
+        case WM_APP+67:return scene.media.available|(scene.media.playing<<1)|(scene.media.previous<<2)|(scene.media.toggle<<3)|(scene.media.next<<4)|(scene.media.unavailable<<5);
+        case WM_APP+68:case WM_APP+69:case WM_APP+70:{const auto r=scene.media_button(msg-(WM_APP+68));return static_cast<LRESULT>((r.left+r.right)*500);}
+        case WM_APP+71:{const auto r=scene.media_button(0);return static_cast<LRESULT>((r.top+r.bottom)*500);}
+        case WM_APP+72:return media_label_hash(scene.media.title);
+        case WM_APP+73:return static_cast<LRESULT>(scene.media_marquee.offset()*1000);
+        case WM_APP+74:return media_timer?1:0;
+        case media_changed_message:scene.media=media.snapshot();schedule();return 0;
+        case calendar_closed_message:
+            if(!calendar.window()&&(scene.panel==Panel::Calendar||scene.panel==Panel::None)) {
+                set_panel(Panel::None);scene.focus=-1;scene.machine.hold(Hold::Keyboard,false,now());
+                if((l||GetForegroundWindow()==hwnd)&&IsWindow(calendar_previous))SetForegroundWindow(calendar_previous);
+                schedule();
+            }return 0;
+        case foreground_changed:
+            // The event timestamp excludes queued activation from before opening.
+            // Querying current foreground here can observe a transient null HWND.
+            if(scene.panel==Panel::Calendar&&static_cast<LONG>(static_cast<DWORD>(l)-calendar_opened)>=0){DWORD pid=0;GetWindowThreadProcessId(reinterpret_cast<HWND>(w),&pid);if(pid&&pid!=GetCurrentProcessId())set_panel(Panel::None);}return 0;
         case WM_DISPLAYCHANGE: if(scene.desktop){release_layer();desktop_position();fullscreen();schedule();}return 0;
         case WM_MOUSEACTIVATE: {
             if(scene.desktop&&scene.panel!=Panel::Launcher) return MA_NOACTIVATE;
@@ -1013,7 +1137,7 @@ public:
             const float x=GET_X_LPARAM(l)*96.0f/dpi,raw_y=GET_Y_LPARAM(l)*96.0f/dpi,y=raw_y-(live_dock?visibility.offset():0);
             scene.pointer_x=x; scene.pointer_y=y;
             if(!tracking) { TRACKMOUSEEVENT t{sizeof(t),TME_LEAVE,hwnd,0}; TrackMouseEvent(&t); tracking=true; }
-            const bool over=inside(scene.dock(),x,y)||(live_dock&&visibility.wanted()&&inside(scene.dock(),x,raw_y))||(scene.panel!=Panel::None && inside(scene.panel_rect(),x,y));
+            const bool over=inside(scene.dock(),x,y)||(live_dock&&visibility.wanted()&&inside(scene.dock(),x,raw_y))||(scene.panel!=Panel::None && scene.panel!=Panel::Calendar && inside(scene.panel_rect(),x,y));
             scene.machine.hold(Hold::Pointer,over,now()); schedule(); return 0;
         }
         case WM_MOUSELEAVE: tracking=false; scene.pointer_x=scene.pointer_y=-1;if(live_dock)pointer_hold();else scene.machine.hold(Hold::Pointer,false,now());schedule();return 0;
@@ -1035,17 +1159,17 @@ public:
         case WM_KEYDOWN: {
             if(w==VK_ESCAPE) { if(scene.panel!=Panel::None) set_panel(Panel::None); else { scene.focus=-1; scene.machine.hold(Hold::Keyboard,false,now());if(live_dock&&GetForegroundWindow()==hwnd&&IsWindow(last_foreground))SetForegroundWindow(last_foreground);schedule(); } }
             else if(w=='F'&&!scene.desktop) { set_panel(Panel::None); scene.machine.suppress(scene.machine.visible(),now()); schedule(); }
-            else if(w=='R'&&!scene.desktop) { scene.reduced=!scene.reduced; scene.machine.reduced_motion(scene.reduced); if(scene.reduced)scene.stop_feedback(); schedule(); }
+            else if(w=='R'&&!scene.desktop) { scene.reduced=!scene.reduced; scene.machine.reduced_motion(scene.reduced); calendar.preferences(scene.reduced);if(scene.reduced)scene.stop_feedback(); schedule(); }
             else if(w==VK_RETURN&&scene.desktop&&scene.panel==Panel::Launcher) {if(!scene.results.empty())launch(scene.inventory.launcher[scene.results[0]].path);set_panel(Panel::None);}
             else if(w==VK_TAB||w==VK_RIGHT||w==VK_LEFT) {
-                const int count=static_cast<int>(scene.shown_groups())+4;
+                const int count=static_cast<int>(scene.shown_groups())+8;
                 const int direction=(w==VK_LEFT||(w==VK_TAB&&(GetKeyState(VK_SHIFT)&0x8000)))?-1:1;
                 scene.focus=(scene.focus+direction+count)%count; scene.machine.hold(Hold::Keyboard,true,now()); schedule();
             } else if((w==VK_RETURN||w==VK_SPACE)&&!(scene.desktop&&scene.panel==Panel::Launcher)) action(std::max(0,scene.focus));
             return 0;
         }
-        case WM_HOTKEY: if(w==3&&scene.machine.visible()){SetForegroundWindow(hwnd);SetFocus(hwnd);scene.focus=0;scene.machine.hold(Hold::Keyboard,true,now());schedule();}return 0;
-        case WM_KILLFOCUS: if(reinterpret_cast<HWND>(w)!=search) { if(scene.desktop)set_panel(Panel::None);scene.focus=-1; scene.machine.hold(Hold::Keyboard,false,now()); schedule(); } return 0;
+        case WM_HOTKEY: if(w==3){fullscreen();if(scene.machine.visible()){SetForegroundWindow(hwnd);SetFocus(hwnd);scene.focus=0;scene.machine.hold(Hold::Keyboard,true,now());schedule();}}return 0;
+        case WM_KILLFOCUS: if(reinterpret_cast<HWND>(w)!=search&&reinterpret_cast<HWND>(w)!=calendar.window()) { if(scene.desktop)set_panel(Panel::None);scene.focus=-1; scene.machine.hold(Hold::Keyboard,false,now()); schedule(); } return 0;
         case WM_COMMAND:
             if(LOWORD(w)==101&&HIWORD(w)==EN_CHANGE) { wchar_t value[128]{}; GetWindowTextW(search,value,128); scene.query=value; scene.filter(); InvalidateRect(hwnd,nullptr,FALSE); } return 0;
         case WM_CTLCOLOREDIT:
@@ -1053,6 +1177,7 @@ public:
             return DefWindowProcW(hwnd,msg,w,l);
         case WM_TIMER:
             if(w==frame_timer) { const auto time=now();scene.machine.tick(time);visibility.tick(time);scene.tick_feedback(time);schedule(); }
+            else if(w==media_title_timer){scene.media_marquee.tick(now());InvalidateRect(hwnd,nullptr,FALSE);}
             else if(w==reconcile_timer) { KillTimer(hwnd,reconcile_timer);reconcile_scheduled=false; scan(false); }
             else if(w==clock_timer) {scene.update_clock();if(scene.machine.progress()>.01f)InvalidateRect(hwnd,nullptr,FALSE);} return 0;
         case visibility_changed: {
@@ -1074,6 +1199,8 @@ public:
             if(changed){if(scene.desktop)desktop_position();InvalidateRect(hwnd,nullptr,FALSE);} return 0;
         }
         case WM_DESTROY:
+            media.stop();
+            calendar.close(false);
             event_target=nullptr; for(auto hook:hooks) if(hook) UnhookWinEvent(hook);
             if(edge)DestroyWindow(edge);UnregisterHotKey(hwnd,3);
             KillTimer(hwnd,frame_timer); KillTimer(hwnd,reconcile_timer);KillTimer(hwnd,clock_timer);release_layer();
@@ -1163,8 +1290,8 @@ int benchmark_dock_render(HINSTANCE instance,const std::wstring& path) {
 }
 int save_preview_snapshot(const std::wstring& path, bool expanded,int panel) {
     try {
-        Scene scene; scene.initialize();scene.desktop=panel>=3&&panel<=10;
-        const UINT image_width=scene.desktop?1000:1160,image_height=(panel>=4&&panel<=6)||(panel>=8&&panel<=10)?88:(scene.desktop?440:740);
+        Scene scene; scene.initialize();scene.desktop=panel>=3&&panel<=13;
+        const UINT image_width=scene.desktop?1000:1160,image_height=(panel>=4&&panel<=6)||(panel>=8&&panel<=13)?88:(scene.desktop?440:740);
         scene.width=static_cast<float>(image_width);scene.height=static_cast<float>(image_height);
         ComPtr<IWICImagingFactory> wic;
         check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(wic.put())));
@@ -1178,6 +1305,8 @@ int save_preview_snapshot(const std::wstring& path, bool expanded,int panel) {
         else if(panel==6){scene.launcher_pulse.start(0);scene.launcher_pulse.tick(60);const auto button=scene.launcher_rect();scene.pointer_x=(button.left+button.right)/2;scene.pointer_y=(button.top+button.bottom)/2;}
         else if(panel==7){scene.panel=Panel::Settings;scene.panel_reveal.start(0);scene.panel_reveal.tick(60);}
         else if(panel>=8&&panel<=10){const auto system=scene.system_rect();constexpr float offsets[]={11,38,63};scene.pointer_x=system.left+offsets[panel-8];scene.pointer_y=scene.layout().center_y;}
+        else if(panel==11){const auto clock=scene.clock_rect();scene.pointer_x=(clock.left+clock.right)/2;scene.pointer_y=scene.layout().center_y;}
+        else if(panel==12||panel==13){scene.media.available=scene.media.previous=scene.media.toggle=scene.media.next=true;scene.media.playing=panel==12;scene.media.title=L"Midnight Drive";scene.media.artist=L"Local player";const auto button=scene.media_button(1);scene.pointer_x=(button.left+button.right)/2;scene.pointer_y=(button.top+button.bottom)/2;}
         scene.draw(); check(rt->EndDraw());
         ComPtr<IWICStream> stream; check(wic->CreateStream(stream.put())); check(stream->InitializeFromFilename(path.c_str(),GENERIC_WRITE));
         ComPtr<IWICBitmapEncoder> encoder; check(wic->CreateEncoder(GUID_ContainerFormatPng,nullptr,encoder.put())); check(encoder->Initialize(stream.get(),WICBitmapEncoderNoCache));

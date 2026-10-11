@@ -53,10 +53,9 @@ try {
     if([DockMotionCheck]::Send($window,0x802d,0) -ne 44000){throw 'Expanded pill height changed.'}
     for($i=0;$i -lt $count;$i++){
         $expanded=[DockMotionCheck]::Send($window,0x802b,$i)
-        if([Math]::Sign($positions[$i]) -ne [Math]::Sign($expanded)){throw 'An app crossed center while expanding.'}
+        if($positions[$i] -ne $expanded){throw 'An app moved while revealing utility wings.'}
     }
-    [void][DockMotionCheck]::Send($window,0x100,37) # Left wraps to Show desktop; do not invoke it in this own-window test.
-    [void][DockMotionCheck]::Send($window,0x100,37) # Left again selects quick settings.
+    for($left=0;$left -lt 6;$left++){[void][DockMotionCheck]::Send($window,0x100,37)} # Pass media, Show desktop and calendar to select quick settings.
     [void][DockMotionCheck]::Send($window,0x100,13)
     $flyout=[DockMotionCheck]::Bounds($window)
     if([Math]::Abs(($flyout.Bottom-$flyout.Top)/$scale-440) -gt 1 -or $flyout.Bottom -ne $before.Bottom){throw 'Flyout resize moved the bottom anchor.'}
@@ -67,9 +66,10 @@ try {
     if([DockMotionCheck]::Send($window,0x8029,0) -ne 3){throw 'Collapse did not start immediately.'}
     Start-Sleep -Milliseconds 130
     if([DockMotionCheck]::Send($window,0x8029,0) -ne 0){throw 'Collapse did not finish promptly.'}
+    for($i=0;$i -lt $count;$i++){if([DockMotionCheck]::Send($window,0x802b,$i) -ne $positions[$i]){throw 'An app moved while hiding utility wings.'}}
     [void][DockMotionCheck]::Send($window,0x10,0)
     if(-not $process.WaitForExit(10000) -or $process.ExitCode -ne 0){throw 'Own dock did not close cleanly.'}
-    'Desktop component passed: balanced pinned/running/expanded subsets, immediate transitions, stable app sides, narrow render layer, fixed bottom anchor, quick settings open/close, clean shutdown. Explorer taskbar untouched.'
+    'Desktop component passed: balanced pinned/running/all-app subsets, immediate transitions, fixed app coordinates across hover, narrow render layer, fixed bottom anchor, quick settings open/close, clean shutdown. Explorer taskbar untouched.'
 } finally {
     $process.Refresh();if(-not $process.HasExited){Stop-Process -Id $process.Id -Force}
     $process.Dispose()

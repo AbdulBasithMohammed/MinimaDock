@@ -23,6 +23,7 @@ public static class DesktopActionCheck {
  [StructLayout(LayoutKind.Sequential)]struct MonitorInfo {public uint Size;public Rect Monitor,Work;public uint Flags;}
  [DllImport("user32.dll")]static extern IntPtr MonitorFromWindow(IntPtr w,uint flags);
  [DllImport("user32.dll")]static extern bool GetMonitorInfo(IntPtr m,ref MonitorInfo info);
+ public static Rect WorkArea(IntPtr w){var info=new MonitorInfo();info.Size=(uint)Marshal.SizeOf(typeof(MonitorInfo));if(!GetMonitorInfo(MonitorFromWindow(w,2),ref info))throw new Exception("No window monitor.");return info.Work;}
  public static void FullscreenOwnFixture(IntPtr w){var cls=new StringBuilder(128);GetClassName(w,cls,128);if(cls.ToString()!="MinimaDock.DesktopActionFixture")throw new Exception("Not an owned fixture.");var info=new MonitorInfo();info.Size=(uint)Marshal.SizeOf(typeof(MonitorInfo));if(!GetMonitorInfo(MonitorFromWindow(w,1),ref info))throw new Exception("No fixture monitor.");SetWindowLongPtr(w,-16,new IntPtr(unchecked((int)0x90000000)));var r=info.Monitor;SetWindowPos(w,IntPtr.Zero,r.Left,r.Top,r.Right-r.Left,r.Bottom-r.Top,0x34);}
  [StructLayout(LayoutKind.Sequential)] public struct Rect {public int Left,Top,Right,Bottom;}
  [StructLayout(LayoutKind.Sequential)] public struct Point {public int X,Y;}

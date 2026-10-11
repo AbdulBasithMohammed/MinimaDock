@@ -45,13 +45,27 @@ try {
     Await {(Read 9) -eq 0 -and (Read 11) -eq 0} 'Leaving right-end reveal did not hide.'
     [void][DesktopActionCheck]::Send($window,0x100,9,0) # Own keyboard hold.
     Await {(Read 9) -eq 1000} 'Keyboard did not reveal.'
-    [void][DesktopActionCheck]::Send($window,0x100,37,0);[void][DesktopActionCheck]::Send($window,0x100,37,0)
+    for($left=0;$left -lt 6;$left++){[void][DesktopActionCheck]::Send($window,0x100,37,0)}
     [void][DesktopActionCheck]::Send($window,0x100,13,0) # Quick settings flyout.
     [void][DesktopActionCheck]::Send($window,0x281,0,0) # Mouse leaves own dock.
     Start-Sleep -Milliseconds 350
     if((Read 9) -ne 1000){throw 'Open flyout did not hold visibility.'}
     [void][DesktopActionCheck]::Send($window,0x100,27,0);[void][DesktopActionCheck]::Send($window,0x100,27,0)
     Await {(Read 9) -eq 0} 'Closing flyout did not restore auto-hide.'
+    for($attempt=0;$attempt -lt 3 -and [DesktopActionCheck]::GetForegroundWindow() -ne $fixture;$attempt++){[void][DesktopActionCheck]::ActivateOwnFixture($fixture);Start-Sleep -Milliseconds 100}
+    if([DesktopActionCheck]::GetForegroundWindow() -ne $fixture){throw 'Calendar fixture could not become foreground.'}
+    [void][DesktopActionCheck]::Send($window,0x312,3,0)
+    Await {(Read 9) -eq 1000} 'Calendar keyboard reveal failed.'
+    for($left=0;$left -lt 5;$left++){[void][DesktopActionCheck]::Send($window,0x100,37,0)}
+    [void][DesktopActionCheck]::Send($window,0x100,13,0)
+    Await {$script:calendar=[DesktopActionCheck]::FindClass($process.Id,'MinimaDock.Calendar');$calendar -ne [IntPtr]::Zero -and (Read 19) -eq 4} 'Calendar did not open.'
+    [void][DesktopActionCheck]::Send($window,0x281,0,0)
+    Start-Sleep -Milliseconds 350
+    if((Read 9) -ne 1000){throw 'Calendar did not hold dock visibility.'}
+    [void][DesktopActionCheck]::Send($calendar,0x100,27,0)
+    try {Await {[DesktopActionCheck]::FindClass($process.Id,'MinimaDock.Calendar') -eq [IntPtr]::Zero -and (Read 9) -eq 0} 'Calendar close retained a visibility hold.'}
+    catch {throw ('Calendar close: panel='+(Read 19)+', auto-hide='+(Read 10)+', opacity='+(Read 9)+', wanted='+(Read 12)+', remembered='+(Read 26)+', fixture='+$fixture+', '+[DesktopActionCheck]::State($fixture))}
+    if([DesktopActionCheck]::GetForegroundWindow() -ne $fixture){throw ('Calendar close did not return app focus. '+[DesktopActionCheck]::State($fixture)+', remembered='+(Read 26)+', fixture='+$fixture+', foreground='+[DesktopActionCheck]::GetForegroundWindow())}
     [void][DesktopActionCheck]::ShowWindow($fixture,1)
     Await {(Read 10) -eq 0 -and (Read 9) -eq 1000 -and (Read 11) -eq 0} 'Restoring the app did not reveal the dock.'
     [void][DesktopActionCheck]::ShowWindow($fixture,3)
@@ -62,9 +76,15 @@ try {
     [void][DesktopActionCheck]::Send($window,0x100,27,0)
     Await {(Read 9) -eq 0} 'Escape did not release shortcut visibility hold.'
     if([DesktopActionCheck]::GetForegroundWindow() -ne $fixture){throw 'Escape did not return focus to the previous application.'}
+    [void][DesktopActionCheck]::Send($window,0x312,3,0)
+    Await {(Read 9) -eq 1000} 'Fullscreen calendar test reveal failed.'
+    for($left=0;$left -lt 5;$left++){[void][DesktopActionCheck]::Send($window,0x100,37,0)}
+    [void][DesktopActionCheck]::Send($window,0x100,13,0)
+    Await {[DesktopActionCheck]::FindClass($process.Id,'MinimaDock.Calendar') -ne [IntPtr]::Zero} 'Fullscreen calendar test did not open.'
     [DesktopActionCheck]::FullscreenOwnFixture($fixture)
     Await {(Read 1) -eq 4 -and (Read 9) -eq 0} 'Real fullscreen fixture did not suppress the dock.'
     if([DesktopActionCheck]::IsWindowVisible($edge)){throw 'Fullscreen still exposes reveal edge.'}
+    if([DesktopActionCheck]::FindClass($process.Id,'MinimaDock.Calendar') -ne [IntPtr]::Zero){throw 'Fullscreen still exposes the calendar.'}
     [void][DesktopActionCheck]::Send($window,0x312,3,0)
     if((Read 12) -ne 0 -or (Read 11) -ne 0){throw 'Fullscreen shortcut bypassed suppression.'}
     [void][DesktopActionCheck]::Send($window,0x10,0,0)

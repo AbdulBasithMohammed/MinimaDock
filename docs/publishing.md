@@ -2,6 +2,14 @@
 
 Publish source, tests, build scripts and documentation through Git. Do not upload a ZIP of the entire development directory: that includes local state even when `.gitignore` excludes it from Git.
 
+## Pre-push security review, October 11, 2026
+
+The v0.2.29 review covered all 81 Git-eligible files and all 69 unique file blobs in the existing reachable commit history. The fetched `origin/main` matched the local base commit. No recognizable credentials, private keys, hardcoded IP addresses or concrete user-profile paths were found. An IPv4-pattern match in `src/app/app.manifest` was manually confirmed to be the assembly version, not an address. No binary assets or ignored development/recovery directories were eligible for this source commit.
+
+The new calendar reads the local date and Windows appearance preferences. Media controls use the local Windows media-session API; they introduce no external-service credentials, HTTP client or telemetry. Media metadata stays in memory, transport requests are bounded and checked against the current session, and the worker stops with the dock. The reviewed source continues to request normal user privileges. This source/privacy review does not certify the application against every vulnerability or cover privately generated release artifacts.
+
+The commit identity uses the owner's GitHub noreply address. The MIT license and original sword artwork remain in place. Local screenshots, deployment records, recovery bundles, toolchains and diagnostics remain ignored and must not be included in public releases without a separate review.
+
 ## Local privacy audit, October 10, 2026
 
 A text-pattern audit found no recognizable API tokens, passwords, private keys or hardcoded IPv4 addresses in the source/documentation intended for publication. No runtime network client or embedded external-service credentials were found in the current native source. This is a review of the current working files, not a guarantee against all possible secrets or a review of remote commit history.

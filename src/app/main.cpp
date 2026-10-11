@@ -1,4 +1,5 @@
 #include "rendering/preview.h"
+#include "rendering/calendar.h"
 #include <shellapi.h>
 #include <objbase.h>
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
@@ -19,6 +20,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     else if (count == 3 && wcscmp(args[1], L"--snapshot-tray-hover") == 0) result = minima::save_preview_snapshot(args[2], true,8);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-wifi-hover") == 0) result = minima::save_preview_snapshot(args[2], true,9);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-sound-hover") == 0) result = minima::save_preview_snapshot(args[2], true,10);
+    else if (count == 3 && wcscmp(args[1], L"--snapshot-clock-hover") == 0) result = minima::save_preview_snapshot(args[2], true,11);
+    else if (count == 3 && wcscmp(args[1], L"--snapshot-media") == 0) result = minima::save_preview_snapshot(args[2], true,12);
+    else if (count == 3 && wcscmp(args[1], L"--snapshot-media-paused") == 0) result = minima::save_preview_snapshot(args[2], true,13);
+    else if (count == 3 && wcscmp(args[1], L"--snapshot-calendar") == 0) result = minima::save_calendar_snapshot(args[2]);
+    else if (count == 3 && wcscmp(args[1], L"--snapshot-calendar-motion") == 0) result = minima::save_calendar_snapshot(args[2],true);
     else if (count == 2 && wcscmp(args[1], L"--dock") == 0) result = minima::run_desktop_dock(instance);
     else if (count == 3 && wcscmp(args[1], L"--benchmark-render") == 0) result = minima::benchmark_dock_render(instance,args[2]);
     else if (count == 1 || (count == 2 && wcscmp(args[1], L"--preview") == 0)) result = minima::run_preview(instance, show);
