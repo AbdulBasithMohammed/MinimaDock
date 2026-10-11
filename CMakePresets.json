@@ -1,0 +1,25 @@
+{
+  "version": 5,
+  "configurePresets": [
+    {
+      "name": "msvc-x64",
+      "displayName": "Windows x64 / Visual Studio 2022",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/msvc-x64"
+    },
+    {
+      "name": "msvc-arm64",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "ARM64",
+      "binaryDir": "${sourceDir}/build/msvc-arm64"
+    }
+  ],
+  "buildPresets": [
+    {"name": "release-x64", "configurePreset": "msvc-x64", "configuration": "Release"},
+    {"name": "release-arm64", "configurePreset": "msvc-arm64", "configuration": "Release"}
+  ],
+  "testPresets": [
+    {"name": "test-x64", "configurePreset": "msvc-x64", "configuration": "Release", "output": {"outputOnFailure": true}}
+  ]
+}

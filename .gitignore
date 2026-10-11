@@ -1,0 +1,27 @@
+.tools/
+build/
+out/
+recovery-bundle/
+captures/
+*.user
+
+# Local credentials, signing material and environment overrides.
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.pfx
+*.p12
+secrets.local.*
+credentials.local.json
+
+# Local editor/agent state and diagnostics.
+.vs/
+.idea/
+.codex/
+.agents/
+*.pdb
+*.dmp
+*.log
