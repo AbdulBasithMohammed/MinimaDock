@@ -1,0 +1,51 @@
+name: Bug report
+description: Something in MinimaDock doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Hover ...
+        3. ...
+  - type: input
+    id: version
+    attributes:
+      label: MinimaDock version
+      description: Settings > About and updates
+      placeholder: "1.0.1"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Win+R, type winver
+      placeholder: "Windows 11 24H2, build 26100"
+  - type: input
+    id: display
+    attributes:
+      label: Display setup
+      placeholder: "One 2560x1440 monitor at 100%"
+  - type: dropdown
+    id: style
+    attributes:
+      label: Dock style
+      options:
+        - Floating dock
+        - Full-width bar
+        - Full-width bar (auto-hide)
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Please hide anything personal.

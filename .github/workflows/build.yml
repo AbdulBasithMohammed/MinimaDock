@@ -1,0 +1,46 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get the LLVM toolchain
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'llvm-mingw.zip'
+          Invoke-WebRequest -Uri 'https://github.com/mstorsjo/llvm-mingw/releases/download/20261006/llvm-mingw-20261006-ucrt-x86_64.zip' -OutFile $zip
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          if ($hash -ne '317492C456AA27EE607A5919F1D2D38DCDC1112516A24D0BF4B00D078F52D17A') { throw "Toolchain checksum mismatch: $hash" }
+          Expand-Archive -LiteralPath $zip -DestinationPath .tools
+
+      - name: Build and run tests
+        shell: pwsh
+        run: ./tools/Build-Portable.ps1 -SkipDesktopTests
+
+      # Builds are reproducible: the same source gives the same hashes as a local build.
+      - name: Binary hashes
+        shell: pwsh
+        run: |
+          foreach ($file in 'MinimaDock.exe', 'MinimaDockTrial.exe', 'MinimaDockGuard.exe') {
+            '{0}  {1}' -f (Get-FileHash -LiteralPath "build/portable/$file" -Algorithm SHA256).Hash, $file
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MinimaDock-${{ github.sha }}
+          path: |
+            build/portable/MinimaDock.exe
+            build/portable/MinimaDockTrial.exe
+            build/portable/MinimaDockGuard.exe
+          retention-days: 14

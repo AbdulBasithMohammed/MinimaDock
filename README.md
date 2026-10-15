@@ -11,6 +11,7 @@ Your apps, a fast local launcher, media, quick settings, calendar and prayer tim
 [![Downloads](https://img.shields.io/github/downloads/AbdulBasithMohammed/MinimaDock/total?style=flat-square&color=5fd1c0)](https://github.com/AbdulBasithMohammed/MinimaDock/releases)
 [![Windows 11](https://img.shields.io/badge/Windows-11%20x64-4f8ff7?style=flat-square&logo=windows11&logoColor=white)](#requirements)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-b49cf2?style=flat-square&logo=cplusplus&logoColor=white)](docs/development.md)
+[![Build](https://img.shields.io/github/actions/workflow/status/AbdulBasithMohammed/MinimaDock/build.yml?branch=main&style=flat-square&label=build)](https://github.com/AbdulBasithMohammed/MinimaDock/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/github/license/AbdulBasithMohammed/MinimaDock?style=flat-square&color=8fe0a0)](LICENSE)
 
 ### [⬇&nbsp; Download for Windows 11](https://github.com/AbdulBasithMohammed/MinimaDock/releases/latest)
@@ -150,6 +151,10 @@ ctest --preset test-x64
 ```
 
 A portable LLVM build (`tools\Build-Portable.ps1`), the installer (`tools\Install-MinimaDock.ps1`) and the release packager (`tools\Make-Release.ps1`) are described in [docs/development.md](docs/development.md). For how everything works under the hood (layout, recovery, compatibility and performance), see [docs/how-it-works.md](docs/how-it-works.md).
+
+## 🤝 Contributing
+
+Ideas, bug reports and pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md): it covers building, trying a build safely and how changes get merged and released.
 
 ## 📄 License
 

@@ -1,0 +1,37 @@
+name: Idea or feature request
+description: Suggest something new for MinimaDock
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would this help with?
+      description: The situation or annoyance, in your own words.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+      description: How you imagine it working. Sketches and examples welcome.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Dock
+        - Launcher
+        - Quick settings / tray
+        - Calendar / clock
+        - Prayer times
+        - Settings window
+        - Install / updates
+        - Other
+  - type: checkboxes
+    id: build
+    attributes:
+      label: Building it
+      options:
+        - label: I'd like to work on this myself

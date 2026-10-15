@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Download MinimaDock
+    url: https://github.com/AbdulBasithMohammed/MinimaDock/releases/latest
+    about: The latest release with Install and Uninstall files.
