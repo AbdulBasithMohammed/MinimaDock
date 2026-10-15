@@ -59,7 +59,7 @@ namespace {
 constexpr UINT inventory_ready = WM_APP + 1, windows_changed = WM_APP + 2, visibility_changed=WM_APP+3;
 constexpr UINT foreground_changed=WM_APP+4,names_changed=WM_APP+5;
 constexpr UINT_PTR frame_timer = 1, reconcile_timer = 2, clock_timer = 3, media_title_timer=4, tray_timer=5, desktop_timer=6, popup_input_timer=7, render_retry_timer=8, hover_timer=9, previews_timer=10, preview_delay_timer=16,
-    settings_timer=11, countdown_timer=12, alarm_timer=13, capture_timer=14, pins_timer=17, caret_timer=18;
+    settings_timer=11, countdown_timer=12, alarm_timer=13, capture_timer=14, pins_timer=17, caret_timer=18, return_focus_timer=19;
 // Timer alarm card events (WM_APP+20..22 belong to the trial supervisor).
 constexpr UINT alarm_event_message=WM_APP+24,control_list_message=WM_APP+30,pins_folder_message=WM_APP+31;
 HWND event_target = nullptr;
@@ -2307,6 +2307,7 @@ public:
     }
     void run_verb(Scene::Verb verb) {
         const auto* chosen=scene.selected();if(!chosen)return;
+        launching();
         const auto item=*chosen;scene.menu_open=false;
         using V=Scene::Verb;const auto path=scene.selected_path();
         const auto done=[&](bool ok,const wchar_t* message){if(ok)launcher_toast(message);else MessageBeep(MB_ICONWARNING);};
@@ -2346,7 +2347,20 @@ public:
         scene.query.clear();scene.launch_usage=load_usage();launcher_index.refresh();scene.launch_apps=launcher_index.apps();
         scene.power_holding=scene.power_pending=-1;scene.launch_toast.clear();scene.launch_files=file_search.results();research();scene.launch_opened=now();
     }
-    void launcher_closed(){scene.power_holding=scene.power_pending=-1;scene.query.clear();scene.menu_open=false;scene.app_bitmaps.clear();} // A countdown never runs unseen.
+    void launcher_closed() {
+        scene.power_holding=scene.power_pending=-1;scene.query.clear();scene.menu_open=false;scene.app_bitmaps.clear(); // A countdown never runs unseen.
+        // Opening a result closes the launcher without Escape's dismiss path: end
+        // the keyboard hold here too, or the dock stays up over maximized and
+        // full-screen windows while it keeps focus.
+        scene.focus=-1;scene.machine.hold(Hold::Keyboard,false,now());
+    }
+    // Lets the app a launcher result opens take the foreground (an already
+    // running browser opening a tab otherwise may not), and gives focus back if
+    // the dock still has it a moment later.
+    void launching() {
+        AllowSetForegroundWindow(ASFW_ANY);
+        SetTimer(hwnd,return_focus_timer,600,nullptr);
+    }
     static float item_step(){return Scene::item_height;}
     void launcher_toast(std::wstring message){scene.launch_toast=std::move(message);scene.toast_since=now();schedule();}
     void move_selection(int delta) {
@@ -2363,6 +2377,7 @@ public:
     void start_power(size_t which){scene.power_pending=static_cast<int>(which);scene.power_deadline=now()+Scene::countdown_time;schedule();}
     void activate_launch(bool elevated) {
         if(scene.launch_found.empty())return;
+        launching();
         const auto item=scene.launch_found[static_cast<size_t>(std::clamp(scene.launch_sel,0,static_cast<int>(scene.launch_found.size())-1))];
         using Kind=Scene::LaunchResult::Kind;
         if(item.kind==Kind::Answer){if(copy_text(hwnd,item.name))launcher_toast(L"Copied "+item.name);return;}
@@ -4168,6 +4183,11 @@ public:
             else if(w==clock_timer) {refresh_clock();}
             else if(w==pins_timer){KillTimer(hwnd,pins_timer);windows_pins_changed();}
             else if(w==caret_timer){scene.clock_now=now();InvalidateRect(hwnd,nullptr,FALSE);}
+            else if(w==return_focus_timer) {
+                KillTimer(hwnd,return_focus_timer);
+                if(scene.panel==Panel::None&&GetForegroundWindow()==hwnd&&IsWindow(last_foreground))SetForegroundWindow(last_foreground);
+                fullscreen();schedule();
+            }
             return 0;
         case visibility_changed: {
             visibility_queued=false;const auto before=scene.machine.state();const bool maximized=auto_hidden,wanted=visibility.wanted();
