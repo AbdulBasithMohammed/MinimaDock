@@ -242,25 +242,36 @@ std::vector<AppWindow> collect_windows(DWORD own_pid) {
     std::erase_if(window_icons,[](const auto& entry){return entry.second.generation!=window_icon_generation;});
     return windows;
 }
+std::wstring shortcut_target(const std::wstring& path){return link_target(path);}
+std::wstring taskbar_pins_folder() {
+    PWSTR roaming=nullptr;std::wstring folder;
+    if(SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData,KF_FLAG_DEFAULT,nullptr,&roaming)))
+        folder=(std::filesystem::path(roaming)/L"Microsoft/Internet Explorer/Quick Launch/User Pinned/TaskBar").wstring();
+    CoTaskMemFree(roaming);return folder;
+}
+// Explorer's taskbar pins (what "Pin to taskbar" anywhere in Windows adds).
+std::vector<Shortcut> windows_pins() {
+    std::vector<Shortcut> pinned;
+    shell_pins(pinned);
+    if(pinned.empty()) {
+        std::error_code error;
+        for(std::filesystem::directory_iterator it(taskbar_pins_folder(),error),end;it!=end&&!error;it.increment(error)) {
+            if(pinned.size()>=16) break;
+            if(has_extension(it->path(),L".lnk")) {
+                const auto path=it->path().wstring();
+                pinned.push_back({it->path().stem().wstring(),path,false,link_target(path),read_icon(path),{}});
+            }
+        }
+    }
+    return pinned;
+}
 Inventory collect_inventory(DWORD own_pid) {
     Inventory result;
     result.windows = collect_windows(own_pid);
     shortcuts(FOLDERID_Desktop, false, result.desktop); shortcuts(FOLDERID_PublicDesktop, false, result.desktop);
     shortcuts(FOLDERID_StartMenu, true, result.launcher); shortcuts(FOLDERID_CommonStartMenu, true, result.launcher);
     for(size_t i=0;i<std::min<size_t>(8,result.desktop.size());++i) result.desktop[i].icon=read_icon(result.desktop[i].path);
-    shell_pins(result.pinned);
-    PWSTR roaming=nullptr;
-    if(result.pinned.empty()&&SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData,KF_FLAG_DEFAULT,nullptr,&roaming))) {
-        const auto folder=std::filesystem::path(roaming)/L"Microsoft/Internet Explorer/Quick Launch/User Pinned/TaskBar"; CoTaskMemFree(roaming);
-        std::error_code error;
-        for(std::filesystem::directory_iterator it(folder,error),end;it!=end&&!error;it.increment(error)) {
-            if(result.pinned.size()>=16) break;
-            if(has_extension(it->path(),L".lnk")) {
-                const auto path=it->path().wstring();
-                result.pinned.push_back({it->path().stem().wstring(),path,false,link_target(path),read_icon(path),{}});
-            }
-        }
-    }
+    result.pinned=windows_pins();
     apply_pin_preferences(result);
     for(auto& pin:result.pinned)if(!pin.icon) {
         if(!pin.app_id.empty())pin.icon=shell_app_icon(pin.app_id,MulDiv(24,GetDpiForSystem(),96));

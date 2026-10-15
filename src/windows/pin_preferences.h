@@ -77,6 +77,17 @@ inline bool save_pin_preference(const Shortcut& pin,bool pinned,const wchar_t* r
     if(ok)ok=RegSetValueExW(key,L"State",0,REG_DWORD,reinterpret_cast<const BYTE*>(&state),sizeof(state))==ERROR_SUCCESS;
     RegCloseKey(key);return ok;
 }
+// "Pin to taskbar" in Windows after "Unpin from dock": Windows' newer choice wins,
+// so the dock-only unpin for that identity is removed.
+inline void forget_unpin(const std::wstring& identity,const wchar_t* root=pin_preferences_key) {
+    if(identity.empty())return;
+    const auto path=pin_key(identity,root);HKEY key=nullptr;
+    if(RegOpenKeyExW(HKEY_CURRENT_USER,path.c_str(),0,KEY_READ,&key)!=ERROR_SUCCESS)return;
+    DWORD state=0,bytes=sizeof(state);
+    const bool unpinned=RegGetValueW(key,nullptr,L"State",RRF_RT_REG_DWORD,nullptr,&state,&bytes)==ERROR_SUCCESS&&state==2&&pin_string(key,L"Identity")==identity;
+    RegCloseKey(key);
+    if(unpinned)RegDeleteTreeW(HKEY_CURRENT_USER,path.c_str());
+}
 // Drag-to-reorder: pins every item (dock-only override) and stores its rank.
 inline bool save_pin_ranks(const std::vector<Shortcut>& pins,const wchar_t* root=pin_preferences_key) {
     bool ok=true;

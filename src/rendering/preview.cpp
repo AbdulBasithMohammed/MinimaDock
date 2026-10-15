@@ -6,6 +6,7 @@
 #include "rendering/glass.h"
 #include "rendering/previews.h"
 #include "rendering/jump_list.h"
+#include "rendering/prayer_toast.h"
 #include "windows/jump_lists.h"
 #include "windows/volume.h"
 #include "rendering/icon_paths.h"
@@ -31,6 +32,7 @@
 #include "windows/desktop.h"
 #include "windows/app_menu.h"
 #include "windows/pin_preferences.h"
+#include "windows/pin_watch.h"
 #include "platform/com_ptr.h"
 #include <dwrite.h>
 #include <dwmapi.h>
@@ -57,9 +59,9 @@ namespace {
 constexpr UINT inventory_ready = WM_APP + 1, windows_changed = WM_APP + 2, visibility_changed=WM_APP+3;
 constexpr UINT foreground_changed=WM_APP+4,names_changed=WM_APP+5;
 constexpr UINT_PTR frame_timer = 1, reconcile_timer = 2, clock_timer = 3, media_title_timer=4, tray_timer=5, desktop_timer=6, popup_input_timer=7, render_retry_timer=8, hover_timer=9, previews_timer=10, preview_delay_timer=16,
-    settings_timer=11, countdown_timer=12, alarm_timer=13, capture_timer=14, prayer_card_timer=15;
+    settings_timer=11, countdown_timer=12, alarm_timer=13, capture_timer=14, pins_timer=17, caret_timer=18;
 // Timer alarm card events (WM_APP+20..22 belong to the trial supervisor).
-constexpr UINT alarm_event_message=WM_APP+24,prayer_card_message=WM_APP+26;
+constexpr UINT alarm_event_message=WM_APP+24,control_list_message=WM_APP+30,pins_folder_message=WM_APP+31;
 HWND event_target = nullptr;
 std::atomic_bool event_queued=false;
 std::atomic_bool visibility_queued=false;
@@ -102,7 +104,7 @@ std::string json_text(const std::wstring& value) {
     return escaped+'"';
 }
 bool inside(D2D1_RECT_F r, float x, float y) { return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }
-struct Group { std::wstring name, initial, executable; std::vector<HWND> windows; std::wstring launch_path; NativeIcon icon; bool pinned=false; std::wstring app_id; ClickPulse pulse{}; bool pressed=false; };
+struct Group { std::wstring name, initial, executable; std::vector<HWND> windows; std::wstring launch_path; NativeIcon icon; bool pinned=false; std::wstring app_id; ClickPulse pulse{}; bool pressed=false; std::int64_t appeared=-1; };
 enum class Panel { None, Launcher, Settings, Tray, Calendar };
 
 class Scene {
@@ -155,6 +157,17 @@ public:
     // Hover magnification (slot 0 = launcher, i+1 = app i) and drag shifts,
     // both springs; the active-app indicator glides between icons.
     std::vector<Spring> magnify, shift, rise, spread;
+    // Apps opening and closing: the pill's app count springs to its new size, new
+    // icons pop in, and closed ones shrink away where they were.
+    Spring slots_visual;bool slots_placed=false;
+    struct Ghost {std::shared_ptr<IconBitmap> icon;std::wstring initial;float x;std::int64_t start;};
+    std::vector<Ghost> ghosts;
+    static constexpr float appear_time=280,vanish_time=220;
+    bool appearing() const {
+        if(reduced)return false;
+        for(const auto& g:groups)if(g.appeared>=0&&static_cast<float>(clock_now-g.appeared)<appear_time)return true;
+        return false;
+    }
     // Hover motion chosen in the Dock Hover Springs preview (2026-10-14).
     static constexpr float hover_stiffness=320,hover_damping=17,hover_grow=1.22f,hover_lift=6,hover_spread=3;
     Spring tip_show,tip_x;     // Name tooltip: springs in and glides between icons.
@@ -213,13 +226,52 @@ public:
     struct LaunchRow {bool header;std::wstring title;size_t result;float top,bottom;};
     std::shared_ptr<const std::vector<LauncherApp>> launch_apps=std::make_shared<std::vector<LauncherApp>>();
     std::map<std::wstring,Usage> launch_usage;
+    // Installed desktop apps by program file and by program folder, so a helper
+    // process (steamwebhelper.exe, a CEF/Electron child, an updater) and pins made
+    // from it resolve to the real app that Start would open.
+    std::shared_ptr<const std::vector<LauncherApp>> indexed_apps;
+    std::unordered_map<std::wstring,size_t> app_programs,app_folders;
+    static std::wstring lower_path(std::wstring p){for(auto& c:p)c=static_cast<wchar_t>(std::towlower(c));return p;}
+    void index_programs() {
+        if(indexed_apps==launch_apps)return;
+        indexed_apps=launch_apps;app_programs.clear();app_folders.clear();
+        wchar_t windows[MAX_PATH]{};GetWindowsDirectoryW(windows,MAX_PATH);const auto system=lower_path(windows);
+        for(size_t i=0;i<launch_apps->size();++i) {
+            const auto program=lower_path((*launch_apps)[i].program);
+            if(program.size()<5||program.compare(program.size()-4,4,L".exe")!=0)continue;
+            app_programs.emplace(program,i);
+            const auto slash=program.find_last_of(L'\\');
+            // System folders hold many unrelated programs; never match by folder there.
+            if(slash!=std::wstring::npos&&program.rfind(system,0)!=0)app_folders.emplace(program.substr(0,slash),i);
+        }
+    }
+    // The installed app a program belongs to: itself, or the app whose own folder
+    // contains it (up to four folders up).
+    const LauncherApp* app_for_program(const std::wstring& exe) const {
+        if(exe.empty()||app_programs.empty())return nullptr;
+        auto path=lower_path(exe);
+        if(const auto found=app_programs.find(path);found!=app_programs.end())return &(*launch_apps)[found->second];
+        for(int level=0;level<4;++level) {
+            const auto slash=path.find_last_of(L'\\');
+            if(slash==std::wstring::npos||slash<3)break;
+            path.resize(slash);
+            if(path.ends_with(L"\\program files")||path.ends_with(L"\\program files (x86)")||path.ends_with(L"\\windowsapps"))break;
+            if(const auto found=app_folders.find(path);found!=app_folders.end())return &(*launch_apps)[found->second];
+        }
+        return nullptr;
+    }
+    // A program that is not itself an installed app, mapped to the one it belongs to.
+    const LauncherApp* helper_owner(const std::wstring& exe) const {
+        const auto* app=app_for_program(exe);
+        return app&&_wcsicmp(app->program.c_str(),exe.c_str())!=0?app:nullptr;
+    }
     std::vector<LaunchResult> launch_found;
     std::vector<LaunchRow> launch_rows;
     std::map<const void*,ComPtr<ID2D1Bitmap>> app_bitmaps;
     std::shared_ptr<const FileResults> launch_files=std::make_shared<FileResults>();
     std::shared_ptr<const FilePreview> file_preview=std::make_shared<FilePreview>();
     // Tab opens the actions for the selected result (Raycast-style).
-    enum class Verb {Open,Admin,ShowInFolder,OpenWith,CopyPath,CopyFile,Properties,Terminal,CopyName,CopyLink,CopyExpression,SnapLeft,SnapRight,Maximize,Minimize,CloseWindow,CopyValue};
+    enum class Verb {Open,Admin,ShowInFolder,OpenWith,CopyPath,CopyFile,Properties,Terminal,CopyName,CopyLink,CopyExpression,SnapLeft,SnapRight,Maximize,Minimize,CloseWindow,CopyValue,PinDock,UnpinDock};
     struct MenuItem {Verb verb;std::wstring name,keys;};
     std::vector<MenuItem> menu_items;
     bool menu_open=false,menu_anchored=false;int menu_sel=0;std::int64_t menu_opened=-1;
@@ -445,6 +497,7 @@ public:
         case K::Setting:menu_items={{Verb::Open,L"Open in Settings",L"\x21B5"},{Verb::CopyLink,L"Copy settings link",L""}};break;
         case K::App:
             menu_items={{Verb::Open,L"Open",L"\x21B5"},{Verb::Admin,L"Run as administrator",L"Shift+\x21B5"}};
+            if(const auto pin=launcher_pin(*item))menu_items.push_back(pinned_match(*pin)?MenuItem{Verb::UnpinDock,L"Unpin from dock",L""}:MenuItem{Verb::PinDock,L"Pin to dock",L""});
             if(!selected_path().empty())menu_items.push_back({Verb::ShowInFolder,L"Show in folder",L"Ctrl+\x21B5"});
             menu_items.push_back({Verb::CopyName,L"Copy name",L""});
             break;
@@ -454,9 +507,39 @@ public:
                 {Verb::CopyPath,L"Copy path",L"Ctrl+Shift+C"},{Verb::Properties,L"Properties",L"Alt+\x21B5"}};
             else menu_items={{Verb::Open,L"Open",L"\x21B5"},{Verb::OpenWith,L"Open with\x2026",L""},{Verb::ShowInFolder,L"Show in folder",L"Ctrl+\x21B5"},
                 {Verb::CopyPath,L"Copy path",L"Ctrl+Shift+C"},{Verb::CopyFile,L"Copy file",L""},{Verb::Properties,L"Properties",L"Alt+\x21B5"}};
+            // Programs and shortcuts can be pinned, as with Windows' "Pin to taskbar".
+            if(const auto pin=launcher_pin(*item))menu_items.insert(menu_items.begin()+1,pinned_match(*pin)?MenuItem{Verb::UnpinDock,L"Unpin from dock",L""}:MenuItem{Verb::PinDock,L"Pin to dock",L""});
             break;
         }
         }
+    }
+    // The dock pin a launcher result stands for: apps (Store apps by their app ID,
+    // desktop apps by their program) and .exe/.lnk files.
+    std::optional<Shortcut> launcher_pin(const LaunchResult& item) const {
+        if(item.kind==LaunchResult::Kind::App&&item.index<launch_apps->size()) {
+            const auto& app=(*launch_apps)[item.index];
+            if(app.id.find(L'!')!=std::wstring::npos)return Shortcut{app.name,L"shell:AppsFolder\\"+app.id,false,{},{},app.id};
+            const auto program=app_file_path(app.id);
+            if(program.empty())return std::nullopt;
+            const bool link=program.size()>4&&_wcsicmp(program.c_str()+program.size()-4,L".lnk")==0;
+            return Shortcut{app.name,program,false,link?shortcut_target(program):program,{},{}};
+        }
+        if(const auto* file=file_of(item);file&&!file->folder) {
+            const auto& p=file->path;
+            const auto ends=[&](const wchar_t* e){const size_t n=wcslen(e);return p.size()>n&&_wcsicmp(p.c_str()+p.size()-n,e)==0;};
+            if(ends(L".exe"))return Shortcut{file->name.substr(0,file->name.size()-4),p,false,p,{},{}};
+            if(ends(L".lnk"))return Shortcut{file->name.substr(0,file->name.size()-4),p,false,shortcut_target(p),{},{}};
+        }
+        return std::nullopt;
+    }
+    const Shortcut* pinned_match(const Shortcut& candidate) const {
+        for(const auto& pin:inventory.pinned) {
+            if(pin_identity(pin)==pin_identity(candidate))return &pin;
+            if(!candidate.app_id.empty()&&pin.app_id==candidate.app_id)return &pin;
+            if(!candidate.target.empty()&&!pin.target.empty()&&_wcsicmp(pin.target.c_str(),candidate.target.c_str())==0)return &pin;
+            if(const auto* app=helper_owner(pin.target);app&&!candidate.target.empty()&&_wcsicmp(app->program.c_str(),candidate.target.c_str())==0)return &pin;
+        }
+        return nullptr;
     }
     D2D1_RECT_F menu_rect() const {
         const auto r=panel_rect();const float h=40+menu_item*static_cast<float>(menu_items.size())+6;
@@ -806,22 +889,30 @@ public:
     }
     // Hold and countdown progress; returns a power action that is now due (or -1).
     int tick_launcher(DockMachine::Time now) {
-        if(!glide_placed){launch_glide.tune(500,35);}
+        if(!glide_placed){launch_glide.tune(500,35);launch_glide.precision(.05f);}
         if(const auto* row=launch_found.empty()?nullptr:row_of(static_cast<size_t>(launch_sel))) {
             if(!glide_placed){launch_glide.snap(row->top);glide_placed=true;}else launch_glide.target(row->top,now,reduced);
         }
         launch_glide.tick(now);
         if(menu_open&&!menu_items.empty()) {
             const float y=menu_row(static_cast<size_t>(std::clamp(menu_sel,0,static_cast<int>(menu_items.size())-1))).top;
-            if(!menu_glide_placed){menu_glide.tune(520,34);menu_glide.snap(y);menu_glide_placed=true;}else menu_glide.target(y,now,reduced);
+            if(!menu_glide_placed){menu_glide.tune(520,34);menu_glide.precision(.05f);menu_glide.snap(y);menu_glide_placed=true;}else menu_glide.target(y,now,reduced);
             menu_glide.tick(now);
         }
         if(power_holding>=0&&now-power_hold_start>=hold_time){power_pending=power_holding;power_holding=-1;power_deadline=now+countdown_time;}
         if(power_pending>=0&&now>=power_deadline){const int due=power_pending;power_pending=-1;return due;}
         return -1;
     }
-    // The caret blinks, so the launcher animates for as long as it is drawn.
-    bool launcher_motion_active() const{return panel==Panel::Launcher||exiting_panel==Panel::Launcher;}
+    // Real launcher motion only. The caret blink is a slow timer (caret_timer),
+    // not a reason to draw every frame.
+    bool launcher_motion_active() const {
+        if(exiting_panel==Panel::Launcher)return true;
+        if(panel!=Panel::Launcher)return false;
+        if(launch_glide.moving()||menu_glide.moving()||power_holding>=0||power_pending>=0)return true;
+        if(since(toast_since)<1700||since(launch_opened)<900||since(menu_opened)<420||since(preview_since)<200)return true;
+        for(const auto start:power_nudge)if(since(start)<700)return true;
+        return false;
+    }
     void sync_launcher(DockMachine::Time now) {
         if(panel!=Panel::Launcher){power_hover=-1;return;}
         const auto r=panel_rect();const float c=(r.left+r.right)/2,s=panel_reveal.scale();
@@ -918,6 +1009,7 @@ public:
         if(motion_tuned)return;
         for(auto& s:tile_press){s.tune(500,26);s.snap(1);}  // Toggle press: 0.95 and back.
         gear_turn.tune(hover_stiffness,hover_damping);knob.tune(hover_stiffness,hover_damping);
+        gear_turn.precision(.2f);knob.precision(.003f); // Degrees; knob travel 0..1.
         page_slide.tune(320,26);page_slide.snap(1);motion_tuned=true;
     }
     // Hover edges start the icon/arrow animations; state changes start the
@@ -1502,7 +1594,7 @@ public:
         if(overflow(i)) return std::any_of(groups.begin()+static_cast<std::ptrdiff_t>(i),groups.end(),[](const Group& g){return !g.windows.empty();});
         return !groups[i].windows.empty();
     }
-    DockLayout layout() const { return {width/2,height-34,width-40,shown_groups()}; }
+    DockLayout layout() const { DockLayout l{width/2,height-34,width-40,shown_groups()};if(slots_placed)l.slots=slots_visual.value();return l; }
     float app_x(size_t index) const { return layout().app_x(index); }
     D2D1_RECT_F app_rect(size_t i) const { const auto x=app_x(i),y=layout().center_y;return D2D1::RectF(x-18,y-19,x+18,y+19); }
     D2D1_RECT_F launcher_rect() const { const auto l=layout();const float x=l.left()+DockLayout::edge;return D2D1::RectF(x,l.center_y-22,x+DockLayout::button,l.center_y+22); }
@@ -1571,11 +1663,11 @@ public:
     }
     void ensure_motion() {
         const size_t n=shown_groups()+1;
-        const auto hover_spring=[](float rest){Spring s;s.tune(hover_stiffness,hover_damping);s.snap(rest);return s;};
-        while(magnify.size()<n)magnify.push_back(hover_spring(1));
-        while(rise.size()<n)rise.push_back(hover_spring(0));
-        while(spread.size()<n)spread.push_back(hover_spring(0));
-        while(shift.size()<n)shift.emplace_back();
+        const auto hover_spring=[](float rest,float precision){Spring s;s.tune(hover_stiffness,hover_damping);s.precision(precision);s.snap(rest);return s;};
+        while(magnify.size()<n)magnify.push_back(hover_spring(1,.002f));
+        while(rise.size()<n)rise.push_back(hover_spring(0,.05f));
+        while(spread.size()<n)spread.push_back(hover_spring(0,.05f));
+        while(shift.size()<n){Spring s;s.precision(.05f);shift.push_back(s);}
         magnify.resize(n);shift.resize(n);rise.resize(n);spread.resize(n);
     }
     int hover_slot(float x,float y) const {
@@ -1603,7 +1695,7 @@ public:
     // Follows tooltip_target: the name springs in, glides to the next icon while
     // shown, and fades out with its last label.
     void sync_tooltip(DockMachine::Time now) {
-        if(tip_show.value()==0&&tip_show.goal()==0)tip_show.tune(hover_stiffness,hover_damping),tip_x.tune(hover_stiffness,hover_damping);
+        if(tip_show.value()==0&&tip_show.goal()==0)tip_show.tune(hover_stiffness,hover_damping),tip_x.tune(hover_stiffness,hover_damping),tip_show.precision(.004f),tip_x.precision(.05f);
         const bool shown=tooltip_target>=0&&dragging<0&&panel==Panel::None&&!pressed&&static_cast<size_t>(tooltip_target)<=shown_groups();
         if(!shown){tip_show.target(0,now,reduced);return;}
         float x=layout().launcher_x();std::wstring label=L"Applications";
@@ -1648,6 +1740,7 @@ public:
     bool motion_moving() const {
         for(const auto* list:{&magnify,&shift,&rise,&spread})for(const auto& spring:*list)if(spring.moving())return true;
         if(tip_show.moving()||tip_x.moving())return true;
+        if(slots_visual.moving()||!ghosts.empty()||appearing())return true;
         for(const auto& spring:wings)if(spring.moving())return true;
         if(panel_motion_active()||launcher_motion_active())return true;
         return indicator.moving()||attention_pulsing();
@@ -1659,6 +1752,9 @@ public:
         sync_tooltip(time);tip_show.tick(time);tip_x.tick(time);
         sync_wings(time);for(auto& spring:wings)spring.tick(time);
         sync_launcher(time);
+        if(slots_placed&&slots_visual.goal()!=static_cast<float>(shown_groups()))slots_visual.target(static_cast<float>(shown_groups()),time,reduced);
+        slots_visual.tick(time);
+        std::erase_if(ghosts,[&](const Ghost& g){return reduced||static_cast<float>(time-g.start)>=vanish_time;});
         sync_panel_motion(time);for(auto& spring:tile_press)spring.tick(time);gear_turn.tick(time);knob.tick(time);page_slide.tick(time);
         indicator.tick(time);if(indicator_shown)indicator_x=indicator.current(time);
         launcher_pulse.tick(time);tray_pulse.tick(time);settings_pulse.tick(time);clock_pulse.tick(time);desktop_pulse.tick(time);panel_reveal.tick(time);
@@ -1672,6 +1768,7 @@ public:
         for(auto& pulse:media_pulses)pulse.stop();
         for(auto* list:{&magnify,&shift,&rise,&spread})for(auto& spring:*list)spring.snap(spring.goal());
         tip_show.snap(tip_show.goal());tip_x.snap(tip_x.goal());
+        slots_visual.snap(slots_visual.goal());ghosts.clear();for(auto& g:groups)g.appeared=-1;
         for(auto& spring:wings)spring.snap(spring.goal());
         for(auto& spring:tile_press)spring.snap(spring.goal());gear_turn.snap(gear_turn.goal());knob.snap(knob.goal());page_slide.snap(page_slide.goal());
     }
@@ -1696,19 +1793,31 @@ public:
     }
     bool accept(Inventory value, bool full) {
         if (full) inventory = std::move(value); else inventory.windows = std::move(value.windows);
+        // Where each icon is drawn now, to slide it to its new place afterwards.
+        std::vector<float> old_x;std::vector<std::shared_ptr<IconBitmap>> old_icons=app_icons;
+        for(size_t i=0;i<shown_groups();++i)old_x.push_back(app_x(i)+(i+1<shift.size()?shift[i+1].value():0));
         const auto previous=std::move(groups);groups.clear();
         for(const auto& pin:inventory.pinned) {
             if(std::any_of(groups.begin(),groups.end(),[&](const Group& g){return (!pin.app_id.empty()&&pin.app_id==g.app_id)||(!pin.target.empty()&&!g.executable.empty()&&_wcsicmp(g.executable.c_str(),pin.target.c_str())==0);}))continue;
             groups.push_back({pin.title,std::wstring(1,static_cast<wchar_t>(towupper(pin.title[0]))),pin.target,{},pin.path,pin.icon,true,pin.app_id});
+            // A pin saved from a helper window (e.g. steamwebhelper) opens the real app.
+            if(const auto* app=helper_owner(pin.target);app&&pin.app_id.find(L'!')==std::wstring::npos) {
+                auto& g=groups.back();g.name=app->name;g.initial=std::wstring(1,static_cast<wchar_t>(towupper(app->name[0])));g.launch_path=app->program;
+            }
         }
         for (const auto& window : inventory.windows) {
+            const auto* owner=window.app_id.find(L'!')==std::wstring::npos?helper_owner(window.executable):nullptr;
             auto found = std::find_if(groups.begin(), groups.end(), [&](const Group& g) {
-                if(!window.app_id.empty()&&!g.app_id.empty())return window.app_id==g.app_id;
-                return !window.executable.empty()&&!g.executable.empty()&&_wcsicmp(g.executable.c_str(),window.executable.c_str())==0;
+                if(!window.app_id.empty()&&!g.app_id.empty()&&window.app_id==g.app_id)return true;
+                if(!window.app_id.empty()&&!g.app_id.empty())return false;
+                if(!window.executable.empty()&&!g.executable.empty()&&_wcsicmp(g.executable.c_str(),window.executable.c_str())==0)return true;
+                // A helper's window joins its app's pin (Steam's window is steamwebhelper's).
+                return owner&&!g.launch_path.empty()&&_wcsicmp(g.launch_path.c_str(),owner->program.c_str())==0;
             });
             if (found == groups.end()) {
                 std::wstring name = window.executable.empty() ? window.title : std::filesystem::path(window.executable).stem().wstring();
-                groups.push_back({name, std::wstring(1, static_cast<wchar_t>(towupper(name[0]))), window.executable, {window.hwnd},window.executable,window.icon,false,window.app_id});
+                if(owner)name=owner->name;
+                groups.push_back({name, std::wstring(1, static_cast<wchar_t>(towupper(name[0]))), window.executable, {window.hwnd},owner?owner->program:window.executable,window.icon,false,window.app_id});
             } else { found->windows.push_back(window.hwnd); if(!found->icon) found->icon=window.icon; }
         }
         // Rank each group once; the sort comparator then compares cached ranks.
@@ -1728,7 +1837,8 @@ public:
         std::vector<Group> sorted;sorted.reserve(groups.size());
         for(const auto i:order) {
             auto& g=groups[i];
-            if(ranks[i]<previous.size()){g.pulse=previous[ranks[i]].pulse;g.pressed=previous[ranks[i]].pressed;}
+            if(ranks[i]<previous.size()){g.pulse=previous[ranks[i]].pulse;g.pressed=previous[ranks[i]].pressed;g.appeared=previous[ranks[i]].appeared;}
+            else if(!previous.empty())g.appeared=clock_now; // Not on first load.
             sorted.push_back(std::move(g));
         }
         groups=std::move(sorted);
@@ -1737,7 +1847,25 @@ public:
         });
         if(!changed)return false;
         rebuild_icons();
+        animate_changes(previous,old_x,old_icons);
         return true;
+    }
+    void animate_changes(const std::vector<Group>& previous,const std::vector<float>& old_x,const std::vector<std::shared_ptr<IconBitmap>>& old_icons) {
+        const float shown=static_cast<float>(shown_groups());
+        if(!slots_placed||previous.empty()||reduced){slots_visual.tune(300,30);slots_visual.precision(.002f);slots_visual.snap(shown);slots_placed=true;ghosts.clear();return;}
+        slots_visual.target(shown,clock_now,reduced);
+        ensure_motion();
+        std::vector<bool> kept(previous.size(),false);
+        for(size_t j=0;j<shown_groups();++j) {
+            size_t k=previous.size();
+            for(size_t p=0;p<previous.size();++p)if(same_identity(groups[j],previous[p])){k=p;break;}
+            if(k<previous.size())kept[k]=true;
+            // Survivors slide from where they were drawn to their new slot.
+            if(k<old_x.size()&&j+1<shift.size()){shift[j+1].snap(old_x[k]-app_x(j));shift[j+1].target(0,clock_now,reduced);}
+        }
+        // Closed apps shrink and fade where they were.
+        for(size_t k=0;k<previous.size()&&k<old_x.size();++k)
+            if(!kept[k])ghosts.push_back({k<old_icons.size()?old_icons[k]:nullptr,previous[k].initial,old_x[k],clock_now});
     }
     // Every pointer-dependent visual tests its rectangle through hover(); the
     // recorded regions (in unscaled scene space) let mouse moves skip redraws
@@ -1823,8 +1951,19 @@ public:
                 const float phase=attention_pulsing()?.5f-.5f*std::cos(static_cast<float>(clock_now-attention_start)/800*6.2831853f):1.0f;
                 color(theme::rgb(0xf0a030,.12f+.16f*phase));target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x,cy),17,17),brush.get());
             };
+            for(const auto& g:ghosts) {
+                const float t=std::clamp(static_cast<float>(clock_now-g.start)/vanish_time,0.0f,1.0f),half=12*(1-.45f*ease_out(t));
+                const auto box=D2D1::RectF(g.x-half,cy-half,g.x+half,cy+half);
+                if(g.icon&&g.icon->bitmap)target->DrawBitmap(g.icon->bitmap.get(),box,1-t);
+                else {rect(box,theme::rgb(0x758bbb,1-t),7);text(g.initial,box,1,theme::rgb(0xf2f4fa,1-t),true);}
+            }
             for(size_t i=0;i<shown_groups();++i) {
-                constexpr float opacity=1;
+                // A newly opened app pops in: it fades up and springs to full size.
+                float opacity=1,pop=1;
+                if(groups[i].appeared>=0&&!reduced) {
+                    const float t=static_cast<float>(clock_now-groups[i].appeared)/appear_time;
+                    if(t<1){opacity=std::clamp(t*1.8f,0.0f,1.0f);pop=.45f+.55f*bezier(.3f,1.45f,.5f,1,std::max(0.0f,t));}
+                }
                 if(static_cast<int>(i)==dragging)continue; // drawn last, above the others
                 const auto button=app_rect(i);const float aside=spread[i+1].value();const auto x=app_x(i)+shift[i+1].value()+aside;
                 const bool over=hover(button);
@@ -1833,7 +1972,7 @@ public:
                 bubble(x,cy,groups[i].pulse,opacity);
                 const float grow=magnify[i+1].value();
                 const float lift=rise[i+1].value();
-                const float half=12*grow*click_scale(groups[i].pulse,groups[i].pressed);
+                const float half=12*grow*pop*click_scale(groups[i].pulse,groups[i].pressed);
                 if(lift>.5f)overlay_rects.push_back(D2D1::RectF(x-half,cy-half-lift,x+half,cy+half-lift)); // Visible above the pill.
                 float dx=96,dy=96;target->GetDpi(&dx,&dy);
                 const auto snap_x=[&](float value){return std::round(value*dx/96)*96/dx;};
@@ -2117,6 +2256,17 @@ public:
     }
     // ---- Launcher ----
     LauncherIndex launcher_index;
+    bool caret_blinking=false;
+    // Explorer's "Pin to taskbar" (desktop icons, File Explorer, Start) also pins to the dock.
+    PinWatch pin_watch;
+    std::vector<std::wstring> windows_pin_ids;
+    static std::vector<std::wstring> pin_ids(const std::vector<Shortcut>& pins){std::vector<std::wstring> ids;for(const auto& p:pins)ids.push_back(pin_identity(p));return ids;}
+    void windows_pins_changed() {
+        const auto pins=windows_pins();const auto ids=pin_ids(pins);
+        // Pinned again in Windows after "Unpin from dock": Windows' newer choice wins.
+        for(const auto& id:ids)if(std::find(windows_pin_ids.begin(),windows_pin_ids.end(),id)==windows_pin_ids.end())forget_unpin(id);
+        windows_pin_ids=ids;scan(true);
+    }
     WindowsKey windows_key;
     // Windows key tapped alone: toggle the launcher, revealing an auto-hidden dock.
     void windows_key_pressed() {
@@ -2173,6 +2323,16 @@ public:
         case V::CopyLink:if(item.kind==Scene::LaunchResult::Kind::Setting)done(copy_text(hwnd,settings_pages()[item.index].uri),L"Link copied");break;
         case V::CopyExpression:done(copy_text(hwnd,Scene::trimmed(scene.query)+L" = "+item.name),L"Copied");break;
         case V::CopyValue:done(copy_text(hwnd,item.value),L"Copied");break;
+        case V::PinDock:case V::UnpinDock:
+            if(const auto pin=scene.launcher_pin(item)) {
+                const auto* existing=scene.pinned_match(*pin);
+                const bool pinning=verb==V::PinDock;
+                // Unpin the dock's own record of the pin so the identities match.
+                const Shortcut record=existing&&!pinning?*existing:*pin;
+                done(save_pin_preference(record,pinning),pinning?L"Pinned to dock":L"Unpinned from dock");
+                scan(true);
+            }
+            break;
         case V::SnapLeft:case V::SnapRight:case V::Maximize:case V::Minimize:case V::CloseWindow: {
             const auto how=verb==V::SnapLeft?Arrange::Left:verb==V::SnapRight?Arrange::Right:verb==V::Maximize?Arrange::Maximize:verb==V::Minimize?Arrange::Minimize:Arrange::Close;
             set_panel(Panel::None);
@@ -2288,10 +2448,8 @@ public:
     // ---- Prayer times (masjid website) ----
     PrayerService prayers;
     PrayerSettings prayer_settings;
-    JumpList prayer_card{prayer_card_message};
-    unsigned prayer_session=0;
     std::vector<int> prayer_fired;
-    int prayer_fired_day=0,prayer_muted_day=0;
+    int prayer_fired_day=0;
     static std::wstring prayer_clock(int minutes,bool marker) {
         if(minutes<0)return L"\x2014";
         SYSTEMTIME t{};t.wHour=static_cast<WORD>((minutes/60)%24);t.wMinute=static_cast<WORD>(minutes%60);
@@ -2329,34 +2487,36 @@ public:
         if(line!=scene.prayer_line){scene.prayer_line=line;schedule();}
         // Each reminder once a day, and only within two minutes (not after sleep).
         if(date!=prayer_fired_day){prayer_fired.clear();prayer_fired_day=date;}
-        if(snap.have&&prayer_settings.reminders&&prayer_muted_day!=date)
+        if(snap.have&&prayer_settings.reminders)
             for(const auto& event:prayer_events(snap.day,friday,prayer_settings.iqama_lead)) {
                 if(now<event.minute||now>event.minute+2||std::find(prayer_fired.begin(),prayer_fired.end(),event.key())!=prayer_fired.end())continue;
                 prayer_fired.push_back(event.key());notify_prayer(event,snap.day);
             }
         calendar.prayers(prayer_view(snap,now,friday,today));
     }
-    // A card above the clock that never takes focus, with a short chime.
+    // A small card at the top centre of the screen in use, over games too, with a
+    // live countdown to Iqama; it shrinks to a pill and never takes focus.
+    PrayerToast prayer_toast;
     void notify_prayer(const PrayerEvent& event,const PrayerDay& day) {
         using Kind=PrayerEvent::Kind;const auto& t=day[event.salah];const std::wstring name=salah_name(event.salah);
-        std::wstring title;
-        if(event.kind==Kind::Adhan)title=name+L" \x00B7 Adhan "+prayer_clock(t.adhan,true)+(t.iqama>=0?L" \x00B7 Iqama "+prayer_clock(t.iqama,true):std::wstring());
-        else if(event.kind==Kind::Iqama)title=name+L" \x00B7 Iqama in "+std::to_wstring(t.iqama-event.minute)+L" min ("+prayer_clock(t.iqama,true)+L")";
-        else title=L"Sunrise at "+prayer_clock(day[Salah::Sunrise].begin,true)+L" \x00B7 Fajr time ends";
-        JumpSection card;card.fixed=true;card.title=title;
-        {auto& e=card.entries.emplace_back();e.id=1;e.text=L"Dismiss";e.glyph=L'\xE711';}
-        {auto& e=card.entries.emplace_back();e.id=2;e.text=L"Mute reminders for today";e.glyph=L'\xE74F';}
-        std::vector<JumpSection> sections;sections.push_back(std::move(card));
-        const auto r=scene.clock_rect();const float scale=dpi/96;
-        POINT a{static_cast<LONG>(std::lround(r.left*scale)),static_cast<LONG>(std::lround(scene.dock().top*scale))},b{static_cast<LONG>(std::lround(r.right*scale)),static_cast<LONG>(std::lround(r.bottom*scale))};
-        ClientToScreen(hwnd,&a);ClientToScreen(hwnd,&b);
-        try {prayer_session=prayer_card.open(hwnd,std::move(sections),RECT{a.x,a.y,b.x,b.y},a.y,static_cast<UINT>(dpi),scene.pal,scene.transparency&&!scene.high_contrast,scene.reduced,false,nullptr,nullptr,false);}
-        catch(HRESULT error){log_error("prayer",error);return;}
-        SetTimer(hwnd,prayer_card_timer,10*60*1000,nullptr);
-        if(scene.timer_state!=Scene::TimerState::Ringing) { // Never cut off the timer's alarm.
-            wchar_t folder[MAX_PATH]{};GetWindowsDirectoryW(folder,MAX_PATH);const auto chime=std::wstring(folder)+L"\\Media\\Windows Notify Calendar.wav";
-            if(GetFileAttributesW(chime.c_str())==INVALID_FILE_ATTRIBUTES||!PlaySoundW(chime.c_str(),nullptr,SND_FILENAME|SND_ASYNC|SND_NODEFAULT))PlaySoundW(L"SystemAsterisk",nullptr,SND_ALIAS|SND_ASYNC);
+        // The Adhan card already counts down to Iqama; the earlier reminder only
+        // returns if that card was dismissed.
+        if(event.kind==Kind::Iqama&&prayer_toast.visible())return;
+        SYSTEMTIME local{};GetLocalTime(&local);
+        const long long seconds=local.wHour*3600LL+local.wMinute*60LL+local.wSecond;const auto tick=GetTickCount64();
+        const auto at=[&](int minute)->ULONGLONG{const long long delta=minute*60LL-seconds;return delta>0?tick+static_cast<ULONGLONG>(delta)*1000:tick;};
+        PrayerToastInfo info;info.start_tick=tick;info.pill=name;
+        if(event.kind==Kind::Sunrise) {
+            const int sunrise=day[Salah::Sunrise].begin;
+            info.title=L"Fajr ends at sunrise";info.subtitle=L"Sunrise at "+prayer_clock(sunrise,true);info.pill=L"Sunrise";info.done=L"Sunrise";info.end_tick=at(sunrise);
+        } else {
+            info.title=name+(event.kind==Kind::Adhan?L" \x00B7 Adhan":L" \x00B7 Iqama soon");
+            info.done=L"Iqama now";
+            if(t.iqama>=0){info.subtitle=L"Iqama at "+prayer_clock(t.iqama,true);info.end_tick=at(t.iqama);info.start_tick=event.kind==Kind::Adhan?tick:at(t.adhan);}
+            else info.subtitle=L"Adhan at "+prayer_clock(t.adhan,true);
         }
+        info.chime=scene.timer_state!=Scene::TimerState::Ringing; // Never cut off the timer's alarm.
+        prayer_toast.show(info,scene.pal,scene.reduced);
     }
     // ---- Quick settings ----
     Connectivity connectivity;
@@ -2818,35 +2978,71 @@ public:
         scene.readability_boost=auto_hidden;
         sync_visibility();
     }
-    void desktop_menu() {
+    // Right-click on empty dock space: the dock's own settings and recovery.
+    void desktop_menu(float x=-1,bool keyboard=false) {
         dismiss_panel();
-        auto menu=CreatePopupMenu();
-        AppendMenuW(menu,MF_STRING,1,L"Keep this test running");
-        AppendMenuW(menu,MF_STRING,2,L"Revert to Windows taskbar  ·  Ctrl+Alt+Backspace");
-        AppendMenuW(menu,MF_STRING,3,L"Quick settings");
-        AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-        AppendMenuW(menu,MF_STRING,4,L"Task Manager");
-        AppendMenuW(menu,MF_STRING,5,L"Taskbar settings");
+        std::vector<JumpSection> sections(live_dock?3:2);
+        add_entry(sections[0],1,L"Task Manager",L'\xE9D9');
+        add_entry(sections[0],2,L"Show desktop",L'\xE7C4');
+        add_entry(sections[0],3,L"Quick settings",L'\xE713');
+        if(live_dock)add_entry(sections[1],4,windows_key.enabled()?L"Windows key opens Start":L"Windows key opens MinimaDock",L'\xE765');
+        add_entry(sections[1],5,L"Windows taskbar settings",L'\xE8A9');
+        if(live_dock) {
+            add_entry(sections[2],6,L"Keep MinimaDock for this session",L'\xE718');
+            add_entry(sections[2],7,L"Return to the Windows taskbar",L'\xE7A7');
+        }
+        const auto d=scene.dock();POINT cursor{};GetCursorPos(&cursor);POINT client=cursor;ScreenToClient(hwnd,&client);
+        const float at=x>=0?x:static_cast<float>(client.x)*96/dpi;
+        glass_menu(std::move(sections),D2D1::RectF(at-1,d.top,at+1,d.bottom),keyboard,[this](UINT id) {
+            if(id==1)launch(L"taskmgr.exe");
+            else if(id==2)action(static_cast<int>(scene.shown_groups())+4);
+            else if(id==3)set_panel(Panel::Settings);
+            else if(id==4){const bool on=!windows_key.enabled();save_windows_key_setting(on);windows_key.enable(on);scene.windows_key_on=on;}
+            else if(id==5)launch(L"ms-settings:taskbar");
+            else if(id==6) {
+                wchar_t module[32768]{};GetModuleFileNameW(nullptr,module,32768);
+                const auto path=(std::filesystem::path(module).parent_path()/L"MinimaDockTrial.exe").wstring();
+                ShellExecuteW(hwnd,L"open",path.c_str(),L"--keep",nullptr,SW_HIDE);
+            } else if(id==7)PostMessageW(hwnd,WM_CLOSE,0,0);
+        });
+    }
+    // Menus in the same glass style as the app jump lists (and the system theme).
+    JumpList control_list{control_list_message};
+    unsigned control_session=0;
+    std::function<void(UINT)> control_action;
+    static void add_entry(JumpSection& section,UINT id,std::wstring text,wchar_t glyph) {
+        auto& e=section.entries.emplace_back();e.id=id;e.text=std::move(text);e.glyph=glyph;
+    }
+    void glass_menu(std::vector<JumpSection> sections,D2D1_RECT_F anchor,bool keyboard,std::function<void(UINT)> action_for) {
+        std::erase_if(sections,[](const JumpSection& s){return s.entries.empty();});
+        const float scale=dpi/96,offset=live_dock?visibility.offset():0;
+        POINT a{static_cast<LONG>(std::lround(anchor.left*scale)),static_cast<LONG>(std::lround((anchor.top+offset)*scale))},b{static_cast<LONG>(std::lround(anchor.right*scale)),static_cast<LONG>(std::lround((anchor.bottom+offset)*scale))};
+        ClientToScreen(hwnd,&a);ClientToScreen(hwnd,&b);
+        POINT top{0,static_cast<LONG>(std::lround((scene.dock().top+offset)*scale))};ClientToScreen(hwnd,&top);
         scene.machine.hold(Hold::ContextMenu,true,now());
-        POINT point{};GetCursorPos(&point);SetForegroundWindow(hwnd);
-        const auto selected=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_NONOTIFY,point.x,point.y,0,hwnd,nullptr);
-        DestroyMenu(menu);scene.machine.hold(Hold::ContextMenu,false,now());
-        PostMessageW(hwnd,WM_NULL,0,0);
-        if(selected!=3&&GetForegroundWindow()==hwnd&&IsWindow(last_foreground))SetForegroundWindow(last_foreground);
-        if(selected==2)PostMessageW(hwnd,WM_CLOSE,0,0);
-        else if(selected==1) {
-            wchar_t module[32768]{};GetModuleFileNameW(nullptr,module,32768);
-            const auto path=(std::filesystem::path(module).parent_path()/L"MinimaDockTrial.exe").wstring();
-            ShellExecuteW(hwnd,L"open",path.c_str(),L"--keep",nullptr,SW_HIDE);
-        } else if(selected==3)set_panel(Panel::Settings);
-        else if(selected==4)launch(L"taskmgr.exe");
-        else if(selected==5)launch(L"ms-settings:taskbar");
+        control_action=std::move(action_for);
+        SetForegroundWindow(hwnd);
+        try {control_session=control_list.open(hwnd,std::move(sections),RECT{a.x,a.y,b.x,b.y},top.y,static_cast<UINT>(dpi),scene.pal,scene.transparency&&!scene.high_contrast,scene.reduced,keyboard,nullptr,nullptr);}
+        catch(HRESULT error){log_error("menu",error);scene.machine.hold(Hold::ContextMenu,false,now());}
         schedule();
+    }
+    void control_list_event(UINT id,unsigned session) {
+        if(session!=control_session)return;
+        scene.machine.hold(Hold::ContextMenu,false,now());
+        auto run=std::move(control_action);control_action=nullptr;
+        if(id&&run)run(id);
+        else if(GetForegroundWindow()==hwnd&&IsWindow(last_foreground))SetForegroundWindow(last_foreground);
+        schedule();
+    }
+    void windows_key_pressed_or_open() {
+        if(scene.panel!=Panel::Launcher)set_panel(Panel::Launcher);
     }
     // Packaged apps must launch through their shell identity, not a protected
     // WindowsApps executable. Preserve original shortcuts and desktop args.
-    static std::wstring launch_target(const Group& group) {
-        if(!group.pinned&&!group.app_id.empty()) {
+    std::wstring launch_target(const Group& group) const {
+        // A helper program never starts its app: launch the app it belongs to.
+        if(const auto* app=scene.helper_owner(group.launch_path))return app->program;
+        if(!group.app_id.empty()&&(!group.pinned||group.launch_path.empty()||_wcsnicmp(group.launch_path.c_str(),L"shell:AppsFolder\\",17)!=0)) {
             const auto shell_path=L"shell:AppsFolder\\"+group.app_id;
             PIDLIST_ABSOLUTE id=nullptr;
             if(SUCCEEDED(SHParseDisplayName(shell_path.c_str(),nullptr,&id,0,nullptr))){CoTaskMemFree(id);return shell_path;}
@@ -2879,7 +3075,8 @@ public:
         std::vector<HWND> windows;for(const auto window:group.windows)if(IsWindow(window))windows.push_back(window);
         if(selected==AppContextMenu::launch_id)launch_app(group);
         else if(selected==AppContextMenu::pin_id) {
-            const Shortcut pin{group.name,group.launch_path,false,group.executable,group.icon,group.app_id};
+            Shortcut pin{group.name,group.launch_path,false,group.executable,group.icon,group.app_id};
+            if(const auto* app=scene.helper_owner(group.executable)){pin.title=app->name;pin.path=app->program;pin.target=app->program;}
             if(save_pin_preference(pin,!group.pinned))scan(true);
             else MessageBoxW(hwnd,L"The app's pin preference could not be saved.",L"MinimaDock",MB_OK|MB_ICONERROR);
         } else if(selected==AppContextMenu::close_id){for(const auto window:windows)PostMessageW(window,WM_CLOSE,0,0);}
@@ -3055,48 +3252,57 @@ public:
         const auto count=scene.shown_groups();
         for(size_t i=0;i<count;++i)if(inside(scene.app_rect(i),x,y)){if(scene.overflow(i))overflow_menu();else app_menu(i,point,window_menu,keyboard);return;}
         if(inside(scene.launcher_rect(),x,y)) {
-            dismiss_panel();auto menu=CreatePopupMenu();
-            AppendMenuW(menu,MF_STRING,1,L"Settings");AppendMenuW(menu,MF_STRING,2,L"Task Manager");
-            AppendMenuW(menu,MF_STRING,3,L"File Explorer");AppendMenuW(menu,MF_STRING,4,L"Terminal");
-            scene.machine.hold(Hold::ContextMenu,true,now());SetForegroundWindow(hwnd);
-            const auto selected=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,hwnd,nullptr);
-            DestroyMenu(menu);PostMessageW(hwnd,WM_NULL,0,0);scene.machine.hold(Hold::ContextMenu,false,now());
-            const wchar_t* paths[]={L"ms-settings:",L"taskmgr.exe",L"explorer.exe",L"wt.exe"};
-            if(selected>=1&&selected<=4)launch(paths[selected-1]);
-            if(GetForegroundWindow()==hwnd&&IsWindow(last_foreground))SetForegroundWindow(last_foreground);
-            schedule();return;
+            dismiss_panel();
+            std::vector<JumpSection> sections(2);
+            add_entry(sections[0],1,L"Search apps and files",L'\xE721');
+            add_entry(sections[0],2,L"Settings",L'\xE713');add_entry(sections[0],3,L"Task Manager",L'\xE9D9');
+            add_entry(sections[0],4,L"File Explorer",L'\xEC50');add_entry(sections[0],5,L"Terminal",L'\xE756');
+            if(live_dock)add_entry(sections[1],6,windows_key.enabled()?L"Windows key opens Start":L"Windows key opens MinimaDock",L'\xE765');
+            add_entry(sections[1],7,L"Open Start menu",L'\xE8FC');
+            glass_menu(std::move(sections),scene.launcher_rect(),keyboard,[this](UINT id) {
+                const wchar_t* paths[]={L"ms-settings:",L"taskmgr.exe",L"explorer.exe",L"wt.exe"};
+                if(id==1)windows_key_pressed_or_open();
+                else if(id>=2&&id<=5)launch(paths[id-2]);
+                else if(id==6){const bool on=!windows_key.enabled();save_windows_key_setting(on);windows_key.enable(on);scene.windows_key_on=on;}
+                else if(id==7)open_start_menu();
+            });
+            return;
         }
         if(scene.machine.progress()>.85f&&(inside(scene.quick_settings_rect(),x,y)||inside(scene.clock_rect(),x,y))) {
-            const bool clock=inside(scene.clock_rect(),x,y);dismiss_panel();auto menu=CreatePopupMenu();
+            const bool clock=inside(scene.clock_rect(),x,y);dismiss_panel();
+            std::vector<JumpSection> sections(clock?2:1);
             if(clock) {
-                AppendMenuW(menu,MF_STRING,1,L"Adjust date and time");AppendMenuW(menu,MF_STRING,2,L"Notification settings");AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-                AppendMenuW(menu,MF_STRING|(prayer_settings.clock?MF_CHECKED:0),3,L"Show next prayer on clock");
-                AppendMenuW(menu,MF_STRING|(prayer_settings.reminders?MF_CHECKED:0),4,L"Prayer reminders");
-                AppendMenuW(menu,MF_STRING,5,L"Open masjid website");
-            }
-            else {AppendMenuW(menu,MF_STRING,1,L"Network settings");AppendMenuW(menu,MF_STRING,2,L"Sound settings");}
-            scene.machine.hold(Hold::ContextMenu,true,now());SetForegroundWindow(hwnd);
-            const auto selected=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,hwnd,nullptr);
-            DestroyMenu(menu);PostMessageW(hwnd,WM_NULL,0,0);scene.machine.hold(Hold::ContextMenu,false,now());
-            if(selected==1)launch(clock?L"ms-settings:dateandtime":L"ms-settings:network");
-            else if(selected==2)launch(clock?L"ms-settings:notifications":L"ms-settings:sound");
-            else if(clock&&(selected==3||selected==4)) {
-                auto& value=selected==3?prayer_settings.clock:prayer_settings.reminders;value=!value;
-                save_prayer_settings(prayer_settings);prayer_tick();
-            } else if(clock&&selected==5)launch(prayer_settings.website);
-            if(GetForegroundWindow()==hwnd&&IsWindow(last_foreground))SetForegroundWindow(last_foreground);
-            schedule();return;
+                add_entry(sections[0],1,L"Adjust date and time",L'\xE787');add_entry(sections[0],2,L"Notification settings",L'\xEA8F');
+                add_entry(sections[1],3,L"Show next prayer on clock",prayer_settings.clock?L'\xE73E':L'\xE916');
+                add_entry(sections[1],4,L"Prayer reminders",prayer_settings.reminders?L'\xE73E':L'\xEA8F');
+                add_entry(sections[1],5,L"Open masjid website",L'\xE774');
+            } else {add_entry(sections[0],1,L"Network settings",L'\xE701');add_entry(sections[0],2,L"Sound settings",L'\xE767');}
+            glass_menu(std::move(sections),clock?scene.clock_rect():scene.quick_settings_rect(),keyboard,[this,clock](UINT id) {
+                if(id==1)launch(clock?L"ms-settings:dateandtime":L"ms-settings:network");
+                else if(id==2)launch(clock?L"ms-settings:notifications":L"ms-settings:sound");
+                else if(clock&&(id==3||id==4)) {
+                    auto& value=id==3?prayer_settings.clock:prayer_settings.reminders;value=!value;
+                    save_prayer_settings(prayer_settings);prayer_tick();
+                } else if(clock&&id==5)launch(prayer_settings.website);
+            });
+            return;
         }
-        desktop_menu();
+        desktop_menu(x,keyboard);
     }
     void schedule() {
         sync_visibility();
         scene.measure_media_title();
-        scene.media_marquee.visible(scene.machine.state()==DockState::Expanded&&visibility.progress()>.99f&&scene.panel==Panel::None,scene.reduced,now());
+        // A long title scrolls only while the pointer is over the media controls:
+        // a resting dock draws nothing (it was redrawing ~22 times a second).
+        const bool over_media=inside(scene.media_rect(),scene.pointer_x,scene.pointer_y);
+        scene.media_marquee.visible(scene.machine.state()==DockState::Expanded&&visibility.progress()>.99f&&scene.panel==Panel::None&&over_media,scene.reduced,now());
         if(scene.media_marquee.active()&&!media_timer)media_timer=SetTimer(hwnd,media_title_timer,33,nullptr)!=0;
         else if(!scene.media_marquee.active()&&media_timer){KillTimer(hwnd,media_title_timer);media_timer=false;}
         scene.clock_now=now();scene.sync_indicator(scene.clock_now);scene.sync_wings(scene.clock_now);scene.sync_panel_motion(scene.clock_now);scene.sync_launcher(scene.clock_now);
         const bool moving=scene.machine.needs_tick()||visibility.needs_tick()||scene.feedback_moving();
+        // The launcher's caret blinks twice a second without the frame loop.
+        if(scene.panel==Panel::Launcher&&!caret_blinking)caret_blinking=SetTimer(hwnd,caret_timer,530,nullptr)!=0;
+        else if(scene.panel!=Panel::Launcher&&caret_blinking){KillTimer(hwnd,caret_timer);caret_blinking=false;}
         if(moving&&!animation_timer) animation_timer=SetTimer(hwnd,frame_timer,10,nullptr)!=0;
         else if(!moving&&animation_timer) { KillTimer(hwnd,frame_timer); animation_timer=false; }
         InvalidateRect(hwnd,nullptr,FALSE);
@@ -3202,9 +3408,26 @@ public:
         if(scene.machine.progress()>.01f)InvalidateRect(hwnd,nullptr,FALSE);
     }
     void launch(const std::wstring& path,const wchar_t* verb=L"open") {
-        const auto result=reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd,verb,path.c_str(),nullptr,nullptr,SW_SHOWNORMAL));
-        if(result==SE_ERR_ACCESSDENIED&&verb!=std::wstring_view(L"open"))return; // Declined elevation prompt.
-        if(result<=32) MessageBoxW(hwnd,L"Windows could not open this item. Its original shortcut or file association has been preserved.",L"MinimaDock",MB_OK|MB_ICONERROR);
+        SHELLEXECUTEINFOW info{};info.cbSize=sizeof(info);info.fMask=SEE_MASK_FLAG_NO_UI|SEE_MASK_NOASYNC;info.hwnd=hwnd;info.lpVerb=verb;info.lpFile=path.c_str();info.nShow=SW_SHOWNORMAL;
+        if(ShellExecuteExW(&info))return;
+        const DWORD error=GetLastError();
+        if(error==ERROR_CANCELLED)return; // Declined elevation prompt.
+        // Packaged apps: activate by app ID, then let Explorer try.
+        constexpr std::wstring_view apps=L"shell:AppsFolder\\";
+        if(path.size()>apps.size()&&_wcsnicmp(path.c_str(),apps.data(),apps.size())==0) {
+            const auto id=path.substr(apps.size());
+            if(id.find(L'!')!=std::wstring::npos&&activate_package(id))return;
+            const auto argument=L"\""+path+L"\"";
+            if(reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd,L"open",L"explorer.exe",argument.c_str(),nullptr,SW_SHOWNORMAL))>32)return;
+        }
+        wchar_t code[16]{};swprintf(code,16,L"%lu",error);
+        const auto message=L"Windows could not open this item (error "+std::wstring(code)+L").\n\n"+path+L"\n\nIts original shortcut or file association has been preserved.";
+        MessageBoxW(hwnd,message.c_str(),L"MinimaDock",MB_OK|MB_ICONERROR);
+    }
+    static bool activate_package(const std::wstring& app_id) {
+        ComPtr<IApplicationActivationManager> manager;DWORD process=0;
+        return SUCCEEDED(CoCreateInstance(CLSID_ApplicationActivationManager,nullptr,CLSCTX_LOCAL_SERVER,IID_PPV_ARGS(manager.put())))&&
+               SUCCEEDED(manager->ActivateApplication(app_id.c_str(),nullptr,AO_NONE,&process));
     }
     // File Explorer reuses a window already showing the target folder, while
     // the Windows taskbar always opens a new one: start explorer.exe directly.
@@ -3442,9 +3665,13 @@ public:
         std::vector<RECT> rects;const float scale=dpi/96;
         const bool shown=scene.machine.visible()&&(!live_dock||visibility.wanted()||visibility.needs_tick());
         const float offset=live_dock?visibility.offset():0;
+        // Rounded outward to an 8 px grid: a lifting icon or springing tooltip then
+        // changes the window region a few times per animation, not every frame
+        // (SetWindowRgn is costly for the compositor).
+        const auto down=[](float v){return static_cast<LONG>(std::floor(v/8)*8);};
+        const auto up=[](float v){return static_cast<LONG>(std::ceil(v/8)*8);};
         const auto add=[&](D2D1_RECT_F r,float side,float top,float bottom,float shift) {
-            rects.push_back({static_cast<LONG>(std::floor((r.left-side)*scale)),static_cast<LONG>(std::floor((r.top-top+shift)*scale)),
-                static_cast<LONG>(std::ceil((r.right+side)*scale)),static_cast<LONG>(std::ceil((r.bottom+bottom+shift)*scale))});
+            rects.push_back({down((r.left-side)*scale),down((r.top-top+shift)*scale),up((r.right+side)*scale),up((r.bottom+bottom+shift)*scale)});
         };
         if(shown) {
             add(scene.dock(),14,10,16,offset);
@@ -3466,7 +3693,11 @@ public:
         (void)position;
         if(!SetWindowRgn(hwnd,region,FALSE))DeleteObject(region);
     }
+    // Frame cost diagnostics (microseconds, summed since start): WM_APP+100..104.
+    std::array<unsigned long long,5> frame_us{}; // begin, draw, end+backdrops+present, region, total
+    static unsigned long long micros(){LARGE_INTEGER c{},f{};QueryPerformanceCounter(&c);QueryPerformanceFrequency(&f);return static_cast<unsigned long long>(c.QuadPart*1000000/f.QuadPart);}
     void render_glass() {
+        const auto t0=micros();
         sync_visibility();
         RECT position{};
         if(layer_bounds_pending)position=pending_layer_bounds;else GetWindowRect(hwnd,&position);
@@ -3476,17 +3707,22 @@ public:
         if(!EqualRect(&current,&position))SetWindowPos(hwnd,nullptr,position.left,position.top,static_cast<int>(w),static_cast<int>(h),SWP_NOACTIVATE|SWP_NOZORDER|SWP_NOOWNERZORDER);
         if(!glass.attached())glass.attach(hwnd,scene.factory.get());
         presenting_layer=true;
+        const auto t1=micros();
         D2D1_MATRIX_3X2_F origin{};auto context=glass.begin(w,h,dpi,origin);
         context->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        const auto t2=micros();frame_us[0]+=t2-t1;
         scene.live_glass=scene.transparency&&!scene.high_contrast;
         if(!glass_bound){scene.bind(context);glass_bound=true;}else scene.retarget(context);
         scene.external_draw=true;scene.base_transform=origin;
         scene.draw();
         scene.external_draw=false;
+        const auto t3=micros();frame_us[1]+=t3-t2;
         glass.end();
         glass.backdrops(scene.painter.shapes,dpi);
         glass.present(live_dock?visibility.opacity():1.0f,live_dock?visibility.offset()*dpi/96:0.0f,scene.live_glass);
+        const auto t4=micros();frame_us[2]+=t4-t3;
         update_region(position);
+        const auto t5=micros();frame_us[3]+=t5-t4;frame_us[4]+=t5-t0;
         presenting_layer=false;
         const POINT destination{position.left,position.top};
         if(scene.panel==Panel::Tray&&scene.native_tray){const auto scale=dpi/96;for(size_t i=0;i<std::min<size_t>(30,scene.tray_items.size()-std::min(scene.tray_scroll,scene.tray_items.size()));++i){const auto r=scene.tray_tile(i);tray.set_bounds(scene.tray_items[i+scene.tray_scroll].key,{destination.x+static_cast<LONG>(std::lround(r.left*scale)),destination.y+static_cast<LONG>(std::lround(r.top*scale)),destination.x+static_cast<LONG>(std::lround(r.right*scale)),destination.y+static_cast<LONG>(std::lround(r.bottom*scale))});}}
@@ -3588,6 +3824,7 @@ public:
             volume.start(hwnd);read_volume();
             connectivity.start(hwnd);updates.start(hwnd);launcher_index.start(hwnd);file_search.start(hwnd);
             if(live_dock){const bool on=load_windows_key_setting();windows_key.enable(on);windows_key.start(hwnd);scene.windows_key_on=on;}
+            windows_pin_ids=pin_ids(windows_pins());pin_watch.start(hwnd,pins_folder_message,taskbar_pins_folder());
             prayer_settings=load_prayer_settings();prayers.start(hwnd,prayer_settings.website);
             // Attention requests (FlashWindow) arrive as HSHELL_FLASH.
             shell_hook=RegisterWindowMessageW(L"SHELLHOOK");if(shell_hook&&!RegisterShellHookWindow(hwnd))shell_hook=0;
@@ -3622,6 +3859,7 @@ public:
         case WM_APP+56: return presented_center_y;
         case WM_APP+57: return glass_mode?glass.allocations():layer_allocations;
         case WM_APP+58: return layer_frames;
+        case WM_APP+100:case WM_APP+101:case WM_APP+102:case WM_APP+103:case WM_APP+104: return static_cast<LRESULT>(frame_us[msg-(WM_APP+100)]);
         case WM_APP+59: return static_cast<LRESULT>(scene.panel);
         case WM_APP+60: return static_cast<LRESULT>(scene.active_pulses());
         case WM_APP+61: return static_cast<LRESULT>(scene.panel_reveal.opacity()*1000);
@@ -3664,15 +3902,15 @@ public:
             return 0;
         case launcher_index_message:
             scene.launch_apps=launcher_index.apps();scene.app_bitmaps.clear();
+            scene.index_programs();scan(true); // Helper windows and pins resolve to their apps.
             if(scene.panel==Panel::Launcher){const auto selected=scene.launch_sel;scene.search_launcher();scene.menu_open=false;scene.launch_sel=std::min(selected,std::max(0,static_cast<int>(scene.launch_found.size())-1));schedule();}
-            return 0;
-        case prayer_card_message:
-            if(static_cast<unsigned>(l)==prayer_session&&w==2){SYSTEMTIME t{};GetLocalTime(&t);prayer_muted_day=t.wYear*10000+t.wMonth*100+t.wDay;}
             return 0;
         case alarm_event_message:
             if(static_cast<unsigned>(l)==alarm_session&&w){if(w==2)timer_start(5*60000);else timer_reset();}
             return 0;
         case jump_list_event_message:jump_list_event(static_cast<UINT>(w),static_cast<unsigned>(l));return 0;
+        case control_list_message:control_list_event(static_cast<UINT>(w),static_cast<unsigned>(l));return 0;
+        case pins_folder_message:SetTimer(hwnd,pins_timer,500,nullptr);return 0; // Settle bursts of changes.
         case previews_event_message:
             if(w==0){KillTimer(hwnd,previews_timer);previews_slot=-1;scene.machine.hold(Hold::Flyout,flyout_open(),now());pointer_hold();schedule();}
             return 0;
@@ -3904,7 +4142,6 @@ public:
             else if(w==countdown_timer)timer_tick();
             else if(w==alarm_timer){KillTimer(hwnd,alarm_timer);PlaySoundW(nullptr,nullptr,0);}
             else if(w==capture_timer)send_capture_keys();
-            else if(w==prayer_card_timer){KillTimer(hwnd,prayer_card_timer);prayer_card.close();}
             else if(w==render_retry_timer) {KillTimer(hwnd,render_retry_timer);InvalidateRect(hwnd,nullptr,FALSE);}
             else if(w==hover_timer) {
                 KillTimer(hwnd,hover_timer);
@@ -3928,7 +4165,10 @@ public:
                 else if(GetTickCount64()-previews_leave>300){previews_leave=0;close_previews();}
             }
             else if(w==reconcile_timer) { KillTimer(hwnd,reconcile_timer);reconcile_scheduled=reconcile_slow=false; scan(false); }
-            else if(w==clock_timer) {refresh_clock();} return 0;
+            else if(w==clock_timer) {refresh_clock();}
+            else if(w==pins_timer){KillTimer(hwnd,pins_timer);windows_pins_changed();}
+            else if(w==caret_timer){scene.clock_now=now();InvalidateRect(hwnd,nullptr,FALSE);}
+            return 0;
         case visibility_changed: {
             visibility_queued=false;const auto before=scene.machine.state();const bool maximized=auto_hidden,wanted=visibility.wanted();
             fullscreen();if(before!=scene.machine.state()||maximized!=auto_hidden||wanted!=visibility.wanted())schedule();return 0;
@@ -3951,7 +4191,7 @@ public:
             busy=false;
             bool changed=false;
             if(data&&scene.dragging>=0){end_drag(false);ReleaseCapture();}
-            if(data) {changed=scene.accept(std::move(*data),full);inventory_loaded=true;
+            if(data) {scene.clock_now=now();changed=scene.accept(std::move(*data),full);inventory_loaded=true;
                 scene.ensure_motion();
                 if(previews.visible()) {
                     bool kept=false;
@@ -3970,8 +4210,8 @@ public:
             KillTimer(hwnd,hover_timer);KillTimer(hwnd,previews_timer);previews.close(false);
             volume.stop();if(shell_hook)DeregisterShellHookWindow(hwnd);
             KillTimer(hwnd,settings_timer);KillTimer(hwnd,countdown_timer);KillTimer(hwnd,capture_timer);stop_alarm();alarm_card.close(false);
-            connectivity.stop();updates.stop();launcher_index.stop();file_search.stop();windows_key.stop();
-            KillTimer(hwnd,prayer_card_timer);prayer_card.close(false);prayers.stop();
+            connectivity.stop();updates.stop();launcher_index.stop();file_search.stop();windows_key.stop();pin_watch.stop();KillTimer(hwnd,pins_timer);
+            prayer_toast.close();prayers.stop();
             media.stop();
             calendar.close(false);
             event_target=nullptr; for(auto hook:hooks) if(hook) UnhookWinEvent(hook);known_windows.clear();

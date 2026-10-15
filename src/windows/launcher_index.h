@@ -13,6 +13,7 @@ struct LauncherApp {
     std::wstring name;
     std::wstring id;                // Parsing name in shell:AppsFolder (AUMID or path).
     std::shared_ptr<void> image;    // 64 px HBITMAP (premultiplied), or null.
+    std::wstring program;           // Desktop apps: the program file it starts ("" for Store apps).
 };
 // Windows' own "All apps" list (shell:AppsFolder: Start Menu shortcuts and
 // Store apps alike), read on a background thread with icons.

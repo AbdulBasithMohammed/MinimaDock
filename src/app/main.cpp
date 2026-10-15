@@ -1,6 +1,7 @@
 #include "rendering/preview.h"
 #include "rendering/calendar.h"
 #include "rendering/glass.h"
+#include "rendering/prayer_toast.h"
 #include "windows/jump_lists.h"
 #include "windows/connectivity.h"
 #include <shellapi.h>
@@ -46,6 +47,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     else if (count == 3 && wcscmp(args[1], L"--snapshot-launcher-emoji") == 0) result = minima::save_preview_snapshot(args[2], true,22);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-launcher-command") == 0) result = minima::save_preview_snapshot(args[2], true,23);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-launcher-windows") == 0) result = minima::save_preview_snapshot(args[2], true,24);
+    else if (count == 3 && wcscmp(args[1], L"--snapshot-prayer-toast") == 0) result = minima::save_prayer_toast_snapshot(args[2], false);
+    else if (count == 3 && wcscmp(args[1], L"--snapshot-prayer-toast-pill") == 0) result = minima::save_prayer_toast_snapshot(args[2], true);
+    else if (count == 3 && wcscmp(args[1], L"--snapshot-prayer-toast-compare") == 0) result = minima::save_prayer_toast_compare(args[2]);
+    else if (count == 2 && wcscmp(args[1], L"--prayer-toast-demo") == 0) result = minima::run_prayer_toast_demo();
     else if (count == 3 && wcscmp(args[1], L"--quick-settings-report") == 0) result = minima::run_quick_settings_report(args[2]);
     else if (count == 3 && wcscmp(args[1], L"--jump-list-report") == 0) result = minima::run_jump_list_report(args[2]);
     else if (count == 2 && wcscmp(args[1], L"--dock") == 0) result = minima::run_desktop_dock(instance);

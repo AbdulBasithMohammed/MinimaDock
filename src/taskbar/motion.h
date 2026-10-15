@@ -17,6 +17,9 @@ public:
     }
     void snap(float value){value_=target_=value;velocity_=0;moving_=false;}
     void tune(float stiffness,float damping){stiffness_=stiffness;damping_=damping;}
+    // Settles once within `position` of the target (and nearly still). Positions
+    // in DIPs can stop at a twentieth of a pixel; the default suits 0..1 scales.
+    void precision(float position){position_eps_=position;velocity_eps_=position*13;}
     bool tick(Time now) {
         if(!moving_)return false;
         // Fixed 4 ms substeps keep the integration stable at any timer cadence.
@@ -25,7 +28,7 @@ public:
             const float h=std::min(dt,.004f);dt-=h;
             velocity_+=(stiffness_*(target_-value_)-damping_*velocity_)*h;value_+=velocity_*h;
         }
-        if(std::abs(target_-value_)<.0015f&&std::abs(velocity_)<.02f){value_=target_;velocity_=0;moving_=false;}
+        if(std::abs(target_-value_)<position_eps_&&std::abs(velocity_)<velocity_eps_){value_=target_;velocity_=0;moving_=false;}
         return true;
     }
     float value() const{return value_;}
@@ -34,6 +37,7 @@ public:
 private:
     float value_=0,target_=0,velocity_=0;
     float stiffness_=520,damping_=30; // Drag shifts; hover motion is tuned softer.
+    float position_eps_=.0015f,velocity_eps_=.02f;
     Time previous_=0;
     bool moving_=false;
 };

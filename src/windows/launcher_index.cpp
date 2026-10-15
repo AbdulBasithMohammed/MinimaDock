@@ -1,5 +1,6 @@
 #include "windows/launcher_index.h"
 #include "platform/com_ptr.h"
+#include "windows/file_search.h"
 #include <shlobj.h>
 #include <shellapi.h>
 #include <powrprof.h>
@@ -24,7 +25,7 @@ std::vector<LauncherApp> read_apps() {
         if(items->Next(1,item.put(),&fetched)!=S_OK||!fetched)break;
         PWSTR name=nullptr,id=nullptr;
         if(SUCCEEDED(item->GetDisplayName(SIGDN_NORMALDISPLAY,&name))&&SUCCEEDED(item->GetDisplayName(SIGDN_PARENTRELATIVEPARSING,&id))) {
-            LauncherApp app;app.name=name;app.id=id;
+            LauncherApp app;app.name=name;app.id=id;app.program=app_file_path(app.id);
             ComPtr<IShellItemImageFactory> images;HBITMAP image=nullptr;
             if(SUCCEEDED(item->QueryInterface(IID_PPV_ARGS(images.put())))&&SUCCEEDED(images->GetImage(SIZE{64,64},SIIGBF_ICONONLY,&image)))app.image=own_bitmap(image);
             if(!app.name.empty()&&std::none_of(apps.begin(),apps.end(),[&](const LauncherApp& a){return a.name==app.name;}))apps.push_back(std::move(app));

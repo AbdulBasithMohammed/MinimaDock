@@ -2,6 +2,7 @@
 #include "rendering/theme.h"
 #include "rendering/glass.h"
 #include <d2d1.h>
+#include <cmath>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -38,7 +39,7 @@ public:
         ComPtr<ID2D1Bitmap> noise;
         check(target->CreateBitmap(D2D1::SizeU(size,size),pixels.data(),size*4,D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED)),noise.put()));
         check(target->CreateBitmapBrush(noise.get(),D2D1::BitmapBrushProperties(D2D1_EXTEND_MODE_WRAP,D2D1_EXTEND_MODE_WRAP,D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR),grain_.put()));
-        target_=target;build();
+        target_=target;cache_.clear();build();
     }
     // Swap to another drawing session of the same device (resources stay valid).
     void retarget(ID2D1RenderTarget* target){target_=target;}
@@ -78,14 +79,23 @@ public:
             solid_->SetColor(p.light?theme::rgb(0x000000):theme::rgb(0xffffff));t->DrawRoundedRectangle(D2D1::RoundedRect(r,radius,radius),solid_.get(),1.5f);
             return;
         }
+        if(live) { // The compositor's blurred backdrop pane for this shape.
+            D2D1_MATRIX_3X2_F current;t->GetTransform(&current);
+            auto inverse=*D2D1::Matrix3x2F::ReinterpretBaseType(&origin);inverse.Invert();
+            shapes.push_back({*D2D1::Matrix3x2F::ReinterpretBaseType(&current)*inverse,r,radius,kind!=GlassKind::Menu&&smooth,layer_opacity});
+        }
+        if(!backdrop&&cached(r,radius,kind))return;
+        layers(r,radius,kind,backdrop);
+    }
+private:
+    // The glass layers of one shape (everything except the compositor backdrop).
+    void layers(D2D1_RECT_F r,float radius,GlassKind kind,ID2D1Brush* backdrop) {
+        auto* t=target_;const auto& p=palette;
+        const bool smooth=kind==GlassKind::Panel;
         const auto geometry=shape(factory_.get(),r,radius,smooth);
         shadow(r,radius,kind,geometry.get());
         if(kind==GlassKind::Menu){menu(r,radius,geometry.get());return;}
-        if(live) {
-            D2D1_MATRIX_3X2_F current;t->GetTransform(&current);
-            auto inverse=*D2D1::Matrix3x2F::ReinterpretBaseType(&origin);inverse.Invert();
-            shapes.push_back({*D2D1::Matrix3x2F::ReinterpretBaseType(&current)*inverse,r,radius,smooth,layer_opacity});
-        } else if(backdrop) t->FillGeometry(geometry.get(),backdrop);
+        if(!live&&backdrop) t->FillGeometry(geometry.get(),backdrop);
         const float top=r.top,bottom=r.bottom,height=bottom-top;
         auto& tint=kind==GlassKind::Tooltip?tooltip_:tint_;
         tint->SetStartPoint(D2D1::Point2F(r.left,top));tint->SetEndPoint(D2D1::Point2F(r.left,bottom));
@@ -108,20 +118,54 @@ public:
             t->DrawLine(D2D1::Point2F(r.left+inset,top+1.1f),D2D1::Point2F(r.right-inset,top+1.1f),glint_.get(),kind==GlassKind::Tooltip?.8f:1.1f);
         }
     }
-private:
     void menu(D2D1_RECT_F r,float radius,ID2D1Geometry* geometry) {
         auto* t=target_;const auto& p=palette;
-        if(live) {
-            D2D1_MATRIX_3X2_F current;t->GetTransform(&current);
-            auto inverse=*D2D1::Matrix3x2F::ReinterpretBaseType(&origin);inverse.Invert();
-            shapes.push_back({*D2D1::Matrix3x2F::ReinterpretBaseType(&current)*inverse,r,radius,false,layer_opacity});
-        }
         // Acrylic flyout tint (opaque when transparency effects are off).
         const auto fill=p.light?theme::rgb(0xfcfcfc,live?.82f:1):theme::rgb(0x2c2c2c,live?.86f:1);
         solid_->SetColor(fill);t->FillGeometry(geometry,solid_.get());
         grain_->SetOpacity(p.grain*.6f);t->FillGeometry(geometry,grain_.get());
         const auto border=shape(factory_.get(),D2D1::RectF(r.left+.5f,r.top+.5f,r.right-.5f,r.bottom-.5f),std::max(0.0f,radius-.5f),false);
         solid_->SetColor(p.light?theme::rgb(0x000000,.10f):theme::rgb(0xffffff,.09f));t->DrawGeometry(border.get(),solid_.get(),1);
+    }
+    // Rendered glass, reused while a shape keeps its size, sub-pixel position and
+    // look: a hovered or idle dock then costs one bitmap draw instead of the
+    // shadow rings, gradients, grain and rim. Only translated shapes are cached;
+    // scaled ones (a flyout opening) are drawn directly.
+    struct Cached {GlassKind kind;float width,height,radius,scale;int fx,fy;unsigned look;float left,top,bitmap_width,bitmap_height;ComPtr<ID2D1Bitmap> bitmap;unsigned long long used;};
+    std::vector<Cached> cache_;unsigned long long frame_=0;
+    static constexpr float margin_x=24,margin_top=14,margin_bottom=30; // Shadow extent.
+    bool cached(D2D1_RECT_F r,float radius,GlassKind kind) {
+        D2D1_MATRIX_3X2_F m;target_->GetTransform(&m);
+        if(m._11!=1||m._22!=1||m._12!=0||m._21!=0)return false;
+        float dpi_x=96,dpi_y=96;target_->GetDpi(&dpi_x,&dpi_y);const float s=dpi_x/96;
+        // Device-pixel placement: the bitmap starts on a whole pixel, and the shape
+        // keeps its exact sub-pixel offset inside it (no blur, no shimmer).
+        const float device_left=(r.left-margin_x+m._31)*s,device_top=(r.top-margin_top+m._32)*s;
+        const float whole_left=std::floor(device_left),whole_top=std::floor(device_top);
+        const int fx=static_cast<int>(std::lround((device_left-whole_left)*8)),fy=static_cast<int>(std::lround((device_top-whole_top)*8));
+        const float width=r.right-r.left,height=r.bottom-r.top;
+        Cached* entry=nullptr;
+        for(auto& c:cache_)if(c.kind==kind&&c.width==width&&c.height==height&&c.radius==radius&&c.scale==s&&c.fx==fx&&c.fy==fy&&c.look==built_key_){entry=&c;break;}
+        if(!entry) {
+            const float bw=std::ceil((width+2*margin_x)*s+2)/s,bh=std::ceil((height+margin_top+margin_bottom)*s+2)/s;
+            ComPtr<ID2D1BitmapRenderTarget> layer;
+            if(FAILED(target_->CreateCompatibleRenderTarget(D2D1::SizeF(bw,bh),layer.put())))return false;
+            auto* previous=target_;target_=layer.get();
+            layer->BeginDraw();layer->Clear(D2D1::ColorF(0,0));
+            // Place r at its sub-pixel offset from the bitmap's whole-pixel origin.
+            layer->SetTransform(D2D1::Matrix3x2F::Translation(((r.left+m._31)*s-whole_left)/s-r.left,((r.top+m._32)*s-whole_top)/s-r.top));
+            bool ok=true;
+            try{layers(r,radius,kind,nullptr);}catch(...){ok=false;}
+            ok=SUCCEEDED(layer->EndDraw())&&ok;target_=previous;
+            ComPtr<ID2D1Bitmap> bitmap;if(!ok||FAILED(layer->GetBitmap(bitmap.put())))return false;
+            if(cache_.size()>=8)cache_.erase(std::min_element(cache_.begin(),cache_.end(),[](const Cached& a,const Cached& b){return a.used<b.used;}));
+            cache_.push_back({kind,width,height,radius,s,fx,fy,built_key_,0,0,bw,bh,std::move(bitmap),0});
+            entry=&cache_.back();
+        }
+        entry->used=++frame_;
+        const float left=whole_left/s-m._31,top=whole_top/s-m._32;
+        target_->DrawBitmap(entry->bitmap.get(),D2D1::RectF(left,top,left+entry->bitmap_width,top+entry->bitmap_height),1,D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+        return true;
     }
     ID2D1RenderTarget* target_=nullptr;
     ComPtr<ID2D1Factory> factory_;
@@ -140,6 +184,7 @@ private:
         return brush;
     }
     void build() {
+        cache_.clear();
         const auto& p=palette;const float extra=boost?p.boost:0;
         const auto top=live?alpha(p.tint_top,p.tint_top.a+extra):p.solid_top,bottom=live?alpha(p.tint_bottom,p.tint_bottom.a+extra):p.solid_bottom;
         tint_=gradient({{0,top},{1,bottom}});

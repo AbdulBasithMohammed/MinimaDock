@@ -1,5 +1,18 @@
 # Initial development delivery
 
+## October 15: motion, menus, pinning and performance, versions 0.2.51 to 0.2.56
+
+- The prayer card uses the dock's glass (blurred backdrop, tint, sheen, rim light, soft shadow) and its outline moon; it shrinks to a centred countdown pill with fixed-width digits.
+- Opening and closing apps animates: new icons pop in, closed ones shrink away, neighbours slide over and the pill's width springs to its new size.
+- Right-click on empty dock space, the MinimaDock button, the clock and quick settings opens the same glass menus as the app jump lists, following the system theme.
+- The launcher can pin and unpin apps and programs; Windows' own "Pin to taskbar" (desktop icons, File Explorer, Start) also pins to the dock, and pinning again overrides an earlier dock-only unpin.
+- Pins and windows from helper programs resolve to the app they belong to (Steam's window is drawn by steamwebhelper.exe): the icon shows the app's name, merges with its pin and launches the real program. Packaged apps launch through their app identity, then app activation, then Explorer, and launch errors show the Windows error code and path.
+- Resources were measured live against Windows' taskbar (see performance.md). A resting dock now draws nothing; active use fell from 16% to 13% of one core after the media title stopped scrolling unhovered, springs settled sooner, the caret blink left the frame loop, glass layers were cached and the window region stopped changing every frame.
+
+## October 14: prayer card over games, version 0.2.50
+
+At each Adhan a chime plays and a small card appears at the top centre of the screen in use, above games running windowed or borderless: the prayer, "Iqama at …", a live countdown and a progress bar. It never takes focus. After 20 seconds it shrinks to a countdown pill; hovering expands it, clicking dismisses it, and it fades out shortly after Iqama. The earlier "Iqama soon" reminder only returns if the card was dismissed, and the sunrise reminder counts down to sunrise. Exclusive full-screen games cannot show desktop windows; the chime still plays. `--prayer-toast-demo` shows a 90-second example.
+
 ## October 14: launcher centered on the dock, steady glass canvas, version 0.2.47
 
 The launcher now opens centered over the dock instead of beside the MinimaDock button. Moving from the launcher straight to the clock or Wi-Fi flyout briefly showed a stretched, misplaced frame: the launcher was the only flyout that resized the composition window (440 to 620 DIP tall, and wider). The glass window now keeps the launcher's size permanently; its input region still covers only the dock and the open flyout, so the extra transparent area never blocks clicks. The layered fallback reserves its drawing buffer once at launcher size for the same reason.

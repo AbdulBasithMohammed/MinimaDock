@@ -1,5 +1,21 @@
 # Performance evidence and release gate
 
+## Live resource comparison, October 15 (versions 0.2.53 to 0.2.56)
+
+Measured on the development PC (12 logical CPUs, RTX 5070 Ti, 2560x1440 at 144 Hz) with `tools/Measure-Resources.ps1`, which samples CPU time, working set, private memory, GPU engine use and dedicated GPU memory for Windows' taskbar processes (Explorer, Start, Search, the shell experience hosts and widgets) and for MinimaDock's dock and trial supervisor over one window. The dock ran in a guarded trial; the "active" passes moved the pointer across the app icons every 350 ms and opened and closed the launcher or Start once. Explorer also hosts the desktop and File Explorer, and during a trial it keeps running with its taskbar hidden, so the dock's numbers add to it. Windows animates its taskbar mostly in `dwm.exe`, which the tool does not measure, so the Windows side of the active pass is understated. Raw JSON stays local under `build/measurements`.
+
+| Scenario | Windows taskbar (6 processes) | MinimaDock (dock + supervisor) |
+|---|---|---|
+| Idle, dock hidden behind a maximized window | 0-0.03% of one core | 0.07% of one core, no frames drawn |
+| Visible, untouched (0.2.53) | 0% | 2.4% of one core: a paused media title kept scrolling |
+| Visible, untouched (0.2.54 and later) | 0% | No frames; the title scrolls only while hovered |
+| Active pass (0.2.53) | 1.8% of one core | 16% of one core (1.3% of the PC), 2,767 frames in 32 s |
+| Active pass (0.2.56) | 0.2% of one core | 13% of one core (1.1% of the PC), ~2,000 frames in 32 s |
+| Working set / private memory | 750-950 MB / 550-790 MB | 135-170 MB / 115-175 MB |
+| Dedicated GPU memory | 160-370 MB | 22-53 MB |
+
+Changes made from these measurements: the marquee only runs while the pointer is over the media controls (0.2.54); spring animations settle at a twentieth of a pixel instead of a thousandth, the open launcher's caret blinks on a 530 ms timer instead of the frame loop, and the glass painter caches each shape's rendered layers (shadow, tint, grain, sheen, rim) in a bitmap reused while its size, sub-pixel position and look are unchanged (0.2.55; cached glass matched direct drawing within 2/255 per channel); and the window region is rounded to an 8 px grid so lifting icons and the springing tooltip no longer reshape the window every frame (0.2.56). Per-frame counters (`WM_APP+100`..`104`: begin, draw, end/backdrops/present, region, total, in microseconds) put a whole glass frame at about 0.4 ms (draw 0.2 ms, region 0.16 ms). During a hover-only pass that is 2.4% of one core, while the process used about 12%: most active cost is main-thread work outside rendering that still needs a sampling profiler to attribute.
+
 No resource-compliance claim is made. The brief requires every resource dimension to avoid reproducible regressions in matched workloads, including DWM, wallpaper and the independent guard.
 
 After the user resumed testing, version 0.2.3 rendered its real inventory on a content-sized 776 by 88 physical-pixel canvas. `captures/deploy-023.json` contains 96 cached frames: median 0.4006 ms, p95 0.5248 ms, maximum 0.7766 ms. The PNG sibling was visually inspected. These remain narrow hidden-window frame timings, not pointer-to-display latency or release resource acceptance. The prior deferral below records the earlier state.
