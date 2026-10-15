@@ -18,10 +18,12 @@
 namespace {
 constexpr UINT revert_message=WM_APP+20,keep_message=WM_APP+21,status_message=WM_APP+22;
 #ifndef MINIMA_TRIAL_TEST
-constexpr UINT snap_changed_message=WM_APP+23;
+constexpr UINT snap_changed_message=WM_APP+23,snap_foreground_message=WM_APP+24;
 HWND snap_control=nullptr;
 std::atomic_bool snap_queued=false;
-void CALLBACK snap_event(HWINEVENTHOOK,DWORD,HWND window,LONG object,LONG child,DWORD,DWORD) {
+void CALLBACK snap_event(HWINEVENTHOOK,DWORD event,HWND window,LONG object,LONG child,DWORD,DWORD) {
+    // Location hooks follow only the foreground process; re-target on activation.
+    if(event==EVENT_SYSTEM_FOREGROUND){if(snap_control&&window)PostMessageW(snap_control,snap_foreground_message,reinterpret_cast<WPARAM>(window),0);return;}
     if(snap_control&&window&&object==OBJID_WINDOW&&child==CHILDID_SELF&&GetAncestor(window,GA_ROOT)==window&&
        minima::window_arranged(window)&&!snap_queued.exchange(true))PostMessageW(snap_control,snap_changed_message,0,0);
 }
@@ -52,8 +54,9 @@ std::wstring sid(HANDLE process) {
     wchar_t* text=nullptr;if(!ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(data.data())->User.Sid,&text))throw std::runtime_error("Cannot read SID.");
     std::wstring value(text);LocalFree(text);return value;
 }
+const std::wstring& own_sid() {static const auto value=sid(GetCurrentProcess());return value;}
 bool same_session(HANDLE process,DWORD pid) {
-    DWORD current=0,target=0;return ProcessIdToSessionId(GetCurrentProcessId(),&current)&&ProcessIdToSessionId(pid,&target)&&current==target&&sid(process)==sid(GetCurrentProcess());
+    DWORD current=0,target=0;return ProcessIdToSessionId(GetCurrentProcessId(),&current)&&ProcessIdToSessionId(pid,&target)&&current==target&&sid(process)==own_sid();
 }
 std::wstring image(HANDLE process) {
     std::wstring path(32768,L'\0');DWORD count=32768;if(!QueryFullProcessImageNameW(process,0,path.data(),&count))return {};
@@ -91,7 +94,7 @@ struct Journal {
     DWORD dock_pid=0;unsigned long long dock_time=0;std::vector<Bar> bars;std::vector<minima::WorkArea> areas;
     void save() const {
         DWORD session=0;ProcessIdToSessionId(GetCurrentProcessId(),&session);
-        std::wostringstream data;data<<L"MinimaDockTaskbarTrial2 "<<sid(GetCurrentProcess())<<L' '<<session<<L' '<<dock_pid<<L' '<<dock_time<<L' '<<bars.size()<<L' '<<areas.size()<<L'\n';
+        std::wostringstream data;data<<L"MinimaDockTaskbarTrial2 "<<own_sid()<<L' '<<session<<L' '<<dock_pid<<L' '<<dock_time<<L' '<<bars.size()<<L' '<<areas.size()<<L'\n';
         for(const auto& b:bars)data<<b.hwnd<<L' '<<b.time<<L' '<<b.pid<<L' '<<b.visible<<L'\n';
         for(const auto& a:areas) {
             data<<std::quoted(a.device);
@@ -109,7 +112,7 @@ struct Journal {
         Journal j;const auto path=directory()/state_name;if(!std::filesystem::exists(path))return j;
         if(std::filesystem::file_size(path)>16384)throw std::runtime_error("Invalid taskbar recovery journal.");
         std::wifstream file(path);std::wstring magic,user;DWORD session=0,current=0;
-        if(!(file>>magic>>user>>session>>j.dock_pid>>j.dock_time)||(magic!=L"MinimaDockTaskbarTrial1"&&magic!=L"MinimaDockTaskbarTrial2")||user!=sid(GetCurrentProcess())||!ProcessIdToSessionId(GetCurrentProcessId(),&current)||session!=current)throw std::runtime_error("Taskbar journal belongs to another user or session.");
+        if(!(file>>magic>>user>>session>>j.dock_pid>>j.dock_time)||(magic!=L"MinimaDockTaskbarTrial1"&&magic!=L"MinimaDockTaskbarTrial2")||user!=own_sid()||!ProcessIdToSessionId(GetCurrentProcessId(),&current)||session!=current)throw std::runtime_error("Taskbar journal belongs to another user or session.");
         if(magic==L"MinimaDockTaskbarTrial1") {
             Bar b;while(file>>b.hwnd>>b.time>>b.pid>>b.visible){if(j.bars.size()>=32)throw std::runtime_error("Too many taskbars in journal.");j.bars.push_back(b);}
         } else {
@@ -163,7 +166,19 @@ void fallback_revert() {
 }
 struct Supervisor {
     Journal journal;Handle dock;HWND ui=nullptr,control=nullptr;bool accepted=false,active=false,journal_written=false;unsigned missed=0;ULONGLONG deadline=0;
-    std::array<HWINEVENTHOOK,2> snap_hooks{};
+    std::array<HWINEVENTHOOK,3> snap_hooks{};
+    DWORD snap_process=0;
+#ifndef MINIMA_TRIAL_TEST
+    // System-wide EVENT_OBJECT_LOCATIONCHANGE also fires for every cursor move.
+    // Snapping changes the foreground window, so watch only its process.
+    void watch_location(HWND foreground) {
+        DWORD pid=0;if(foreground)GetWindowThreadProcessId(foreground,&pid);
+        if(!pid||pid==GetCurrentProcessId()||(pid==snap_process&&snap_hooks[0]))return;
+        if(snap_hooks[0])UnhookWinEvent(snap_hooks[0]);
+        snap_hooks[0]=SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE,EVENT_OBJECT_LOCATIONCHANGE,nullptr,snap_event,pid,0,WINEVENT_OUTOFCONTEXT);
+        snap_process=snap_hooks[0]?pid:0;
+    }
+#endif
     ~Supervisor(){stop();}
     bool stop() {
         if(!active)return journal.restored();active=false;
@@ -171,6 +186,7 @@ struct Supervisor {
         snap_control=nullptr;
 #endif
         for(auto& hook:snap_hooks){if(hook)UnhookWinEvent(hook);hook=nullptr;}
+        snap_process=0;
         journal.restore();
         if(ui)PostMessageW(ui,WM_CLOSE,0,0);
         if(dock.value&&WaitForSingleObject(dock.value,1500)==WAIT_TIMEOUT)TerminateProcess(dock.value,0);
@@ -191,8 +207,12 @@ struct Supervisor {
         return TRUE;
     }
     void hide() {
-        const auto count=journal.bars.size();EnumWindows(enumerate,reinterpret_cast<LPARAM>(this));
-        if(count!=journal.bars.size()||!journal_written){journal.save();journal_written=true;}
+        // Destroyed taskbars (Explorer restarts) can never be restored; drop
+        // them so repeated restarts cannot exceed the journal's 32-record bound.
+        const auto count=journal.bars.size();std::erase_if(journal.bars,[](const Bar& b){return !valid(b);});
+        const auto kept=journal.bars.size();EnumWindows(enumerate,reinterpret_cast<LPARAM>(this));
+        if(journal.bars.size()>32)throw std::runtime_error("Too many Windows taskbars to journal; trial reverted.");
+        if(count!=kept||kept!=journal.bars.size()||!journal_written){journal.save();journal_written=true;}
         for(const auto& b:journal.bars)if(valid(b)&&IsWindowVisible(reinterpret_cast<HWND>(static_cast<ULONG_PTR>(b.hwnd))))ShowWindowAsync(reinterpret_cast<HWND>(static_cast<ULONG_PTR>(b.hwnd)),SW_HIDE);
     }
     void expand_work_areas() {
@@ -248,8 +268,9 @@ struct Supervisor {
         Sleep(100);expand_work_areas();
 #ifndef MINIMA_TRIAL_TEST
         snap_queued=false;snap_control=control;
-        snap_hooks[0]=SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE,EVENT_OBJECT_LOCATIONCHANGE,nullptr,snap_event,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
         snap_hooks[1]=SetWinEventHook(EVENT_SYSTEM_MOVESIZEEND,EVENT_SYSTEM_MOVESIZEEND,nullptr,snap_event,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
+        snap_hooks[2]=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,nullptr,snap_event,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
+        watch_location(GetForegroundWindow());
 #endif
         SetTimer(control,1,2000,nullptr);
     }
@@ -262,6 +283,7 @@ struct Supervisor {
             if(message==keep_message||(message==WM_HOTKEY&&w==2)){self->accepted=true;return 1;}
 #ifndef MINIMA_TRIAL_TEST
             if(message==snap_changed_message){snap_queued=false;if(self->active)self->expand_work_areas();return 0;}
+            if(message==snap_foreground_message){if(self->active)self->watch_location(reinterpret_cast<HWND>(w));return 0;}
 #endif
             if(message==revert_message||message==WM_CLOSE||(message==WM_HOTKEY&&w==1)){const auto restored=self->stop();DestroyWindow(window);return restored?1:0;}
             if(message==WM_TIMER) {
@@ -298,7 +320,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
         }
         if(action!=L"--trial")return 2;
         DWORD session=0;ProcessIdToSessionId(GetCurrentProcessId(),&session);
-        const auto mutex_name=std::wstring(L"Local.")+control_class+L"."+sid(GetCurrentProcess())+L"."+std::to_wstring(session);
+        const auto mutex_name=std::wstring(L"Local.")+control_class+L"."+own_sid()+L"."+std::to_wstring(session);
         Handle lock(CreateMutexW(nullptr,FALSE,mutex_name.c_str()));if(!lock.value)throw std::runtime_error("Cannot create trial lock.");
         if(GetLastError()==ERROR_ALREADY_EXISTS){const auto control=find_control();return control?0:5;}
         Supervisor supervisor;WNDCLASSW klass{};klass.lpfnWndProc=Supervisor::proc;klass.hInstance=instance;klass.lpszClassName=control_class;

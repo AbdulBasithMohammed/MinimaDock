@@ -2,18 +2,22 @@ param([string]$Executable=(Join-Path $PSScriptRoot '..\..\build\portable\MinimaD
 $ErrorActionPreference='Stop'
 Add-Type -Path (Join-Path $PSScriptRoot 'Desktop.Fixture.cs')
 $process=$null;$window=[IntPtr]::Zero;$previous=[DesktopActionCheck]::GetForegroundWindow()
+$cursor=New-Object DesktopActionCheck+Point;[void][DesktopActionCheck]::GetCursorPos([ref]$cursor)
 function Read([int]$Offset){[DesktopActionCheck]::Send($window,0x8028+$Offset,0,0)}
 function Await([scriptblock]$Check,[string]$Label){for($i=0;$i -lt 100;$i++){if(& $Check){return};Start-Sleep -Milliseconds 30};throw $Label}
 function Bounds {$r=New-Object DesktopActionCheck+Rect;[void][DesktopActionCheck]::GetWindowRect($window,[ref]$r);return $r}
 function ClickPanel([bool]$Launcher) {
     $r=Bounds;$scale=[DesktopActionCheck]::GetDpiForWindow($window)/96.0
-    $x=($r.Right-$r.Left)/2
-    if(-not $Launcher){$x+=((Read 14)/2000-166-14+63)*$scale}
+    $x=(Read 46)*$scale/1000
+    if(-not $Launcher){$x=((Read 47)/1000+(Read 14)/1000-166-14+63)*$scale}
     $y=(Read 7)*$scale/1000
     $point=([int][Math]::Round($y) -shl 16) -bor ([int][Math]::Round($x) -band 65535)
     [void][DesktopActionCheck]::Send($window,0x202,0,$point)
 }
 try {
+    $fixture=[DesktopActionCheck]::Fixture()
+    for($attempt=0;$attempt -lt 3 -and [DesktopActionCheck]::GetForegroundWindow() -ne $fixture;$attempt++){[void][DesktopActionCheck]::ActivateOwnFixture($fixture);Start-Sleep -Milliseconds 100}
+    if([DesktopActionCheck]::GetForegroundWindow() -ne $fixture){throw 'Could not activate blank popup fixture.'}
     $process=Start-Process -FilePath ([IO.Path]::GetFullPath($Executable)) -ArgumentList '--dock' -WindowStyle Hidden -PassThru
     Await {$script:window=[DesktopActionCheck]::Find($process.Id);$window -ne [IntPtr]::Zero -and (Read 0) -eq 1} 'Dock not ready.'
     [void][DesktopActionCheck]::Send($window,0x100,9,0)
@@ -29,6 +33,7 @@ try {
                 $panel=if($opening){if($launcher){1}else{2}}else{0}
                 if((Read 19) -ne $panel){throw 'Actual launcher/volume click did not toggle the intended popup.'}
                 if((Read 18) -le $frames){throw 'Popup bounds changed before a new native frame was presented.'}
+                if(-not $opening){Await {(Read 49) -eq 0} 'Closing panel did not finish its exit animation.'}
                 $r=Bounds;$expectedHeight=if($opening){440}else{88}
                 $scale=[DesktopActionCheck]::GetDpiForWindow($window)/96.0
                 if([Math]::Abs(($r.Bottom-$r.Top)/$scale-$expectedHeight) -gt 1 -or $r.Bottom -ne $baseline.Bottom -or $r.Left -ne $baseline.Left){throw 'Popup moved the taskbar anchor or changed its horizontal position.'}
@@ -43,6 +48,8 @@ try {
     [void][DesktopActionCheck]::Send($window,0x10,0,0)
     if(-not $process.WaitForExit(10000) -or $process.ExitCode -ne 0){throw 'Dock did not close cleanly.'}
 } finally {
+    [DesktopActionCheck]::CloseFixture()
     if($process){$process.Refresh();if(-not $process.HasExited){Stop-Process -Id $process.Id -Force};$process.Dispose()}
     [void][DesktopActionCheck]::SetForegroundWindow($previous)
+    [void][DesktopActionCheck]::SetCursorPos($cursor.X,$cursor.Y)
 }

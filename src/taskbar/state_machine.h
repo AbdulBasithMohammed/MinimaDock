@@ -12,6 +12,7 @@ public:
     [[nodiscard]] bool active() const{return progress_<1;}
     [[nodiscard]] float radius() const{return 10+8*(1-(1-progress_)*(1-progress_));}
     [[nodiscard]] float opacity() const{return .16f*(1-progress_)*(1-progress_);}
+    [[nodiscard]] float scale() const;
 private:
     Time start_=0;
     float progress_=1;
@@ -19,15 +20,21 @@ private:
 class PanelReveal {
 public:
     using Time=std::int64_t;
-    void start(Time now,bool reduced=false){start_=now;progress_=reduced?1.0f:0.0f;}
+    void start(Time now,bool reduced=false){value_=target_=0;moving_=false;transition(true,now,reduced);}
+    void open(Time now,bool reduced=false){transition(true,now,reduced);}
+    void close(Time now,bool reduced=false){transition(false,now,reduced);}
     void tick(Time now);
-    void settle(){progress_=1;}
-    [[nodiscard]] bool active() const{return progress_<1;}
-    [[nodiscard]] float opacity() const{return 1-(1-progress_)*(1-progress_)*(1-progress_);}
+    void settle(){value_=target_;moving_=false;}
+    [[nodiscard]] bool active() const{return moving_;}
+    [[nodiscard]] bool hidden() const{return value_==0&&!moving_;}
+    [[nodiscard]] float opacity() const{return value_;}
     [[nodiscard]] float offset() const{return 8*(1-opacity());}
+    [[nodiscard]] float scale() const{return .98f+.02f*opacity();}
 private:
-    Time start_=0;
-    float progress_=1;
+    void transition(bool opening,Time now,bool reduced);
+    Time start_=0,duration_=180;
+    float value_=1,from_=1,target_=1;
+    bool moving_=false;
 };
 // Independent of horizontal expansion: bounded critically damped visibility
 // motion keeps position and velocity continuous when the user reverses direction.

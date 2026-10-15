@@ -2,7 +2,6 @@
 #include <dwmapi.h>
 #include <shlobj.h>
 #include <shellapi.h>
-#include <shldisp.h>
 #include <commoncontrols.h>
 #include <propsys.h>
 #include <propkey.h>
@@ -13,6 +12,7 @@
 #include "platform/com_ptr.h"
 #include <unordered_map>
 #include "windows/pin_stream.h"
+#include "windows/pin_preferences.h"
 
 namespace minima {
 namespace {
@@ -21,14 +21,27 @@ std::wstring property_string(IPropertyStore* properties,REFPROPERTYKEY key) {
     if(SUCCEEDED(properties->GetValue(key,&value))&&value.vt==VT_LPWSTR&&value.pwszVal)text=value.pwszVal;
     PropVariantClear(&value);return text;
 }
+// Paths may be long, but per-window/per-shortcut work must not zero 64 KB
+// stack arrays. Size environment expansion exactly; other Shell calls use an
+// uninitialized heap buffer of the maximum length.
+constexpr DWORD long_path=32768;
+std::unique_ptr<wchar_t[]> path_buffer(){auto buffer=std::make_unique_for_overwrite<wchar_t[]>(long_path);buffer[0]=0;return buffer;}
+std::wstring expand_environment(const wchar_t* value) {
+    const auto needed=ExpandEnvironmentStringsW(value,nullptr,0);
+    if(!needed||needed>long_path)return {};
+    std::wstring result(needed,wchar_t{});
+    const auto written=ExpandEnvironmentStringsW(value,result.data(),needed);
+    if(!written||written>needed)return {};
+    result.resize(written-1);return result;
+}
+bool has_extension(const std::filesystem::path& path,const wchar_t* extension){return _wcsicmp(path.extension().c_str(),extension)==0;}
 NativeIcon own_icon(HICON icon) {return icon?NativeIcon(icon,[](void* h){DestroyIcon(static_cast<HICON>(h));}):NativeIcon{};}
 NativeIcon resource_icon(const std::wstring& resource) {
     static std::unordered_map<std::wstring,NativeIcon> cache;
     if(resource.empty())return {};
     if(const auto found=cache.find(resource);found!=cache.end())return found->second;
-    wchar_t expanded[32768]{};
-    if(!ExpandEnvironmentStringsW(resource.c_str(),expanded,32768))return {};
-    std::wstring path=expanded;int index=0;
+    std::wstring path=expand_environment(resource.c_str());int index=0;
+    if(path.empty())return {};
     if(const auto comma=path.rfind(L',');comma!=std::wstring::npos) {
         wchar_t* end=nullptr;const auto parsed=wcstol(path.c_str()+comma+1,&end,10);
         if(!end||*end!=0)return {};
@@ -36,7 +49,7 @@ NativeIcon resource_icon(const std::wstring& resource) {
     }
     if(path.size()>1&&path.front()==L'"'&&path.back()==L'"')path=path.substr(1,path.size()-2);
     HICON raw=nullptr;SHDefExtractIconW(path.c_str(),index,0,&raw,nullptr,MAKELONG(48,0));
-    auto icon=own_icon(raw);if(cache.size()>=128)cache.clear();cache.emplace(resource,icon);return icon;
+    auto icon=own_icon(raw);if(cache.size()>=128)cache.erase(cache.begin());cache.emplace(resource,icon);return icon;
 }
 NativeIcon shell_app_icon(const std::wstring& app_id,UINT pixels) {
     static std::unordered_map<std::wstring,NativeIcon> cache;
@@ -57,7 +70,7 @@ NativeIcon shell_app_icon(const std::wstring& app_id,UINT pixels) {
         if(mask){ICONINFO info{TRUE,0,0,mask,color};raw=CreateIconIndirect(&info);DeleteObject(mask);}
     }
     DeleteObject(color);auto icon=own_icon(raw);
-    if(cache.size()>=128)cache.clear();cache.emplace(key,icon);return icon;
+    if(cache.size()>=128)cache.erase(cache.begin());cache.emplace(key,icon);return icon;
 }
 NativeIcon read_icon(const std::wstring& path) {
     if(path.empty()) return {};
@@ -67,13 +80,13 @@ NativeIcon read_icon(const std::wstring& path) {
     HICON raw=nullptr;
     // Virtual shell pins (notably File Explorer) can have no filesystem target.
     // Honor the shortcut's actual icon resource before asking the file image list.
-    if(_wcsicmp(std::filesystem::path(path).extension().c_str(),L".lnk")==0) {
+    if(has_extension(path,L".lnk")) {
         ComPtr<IShellLinkW> link;ComPtr<IPersistFile> file;
         if(SUCCEEDED(CoCreateInstance(CLSID_ShellLink,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(link.put())))&&
            SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(file.put())))&&SUCCEEDED(file->Load(path.c_str(),STGM_READ))) {
-            wchar_t location[32768]{},expanded[32768]{};int index=0;
-            if(SUCCEEDED(link->GetIconLocation(location,32768,&index))&&location[0]&&ExpandEnvironmentStringsW(location,expanded,32768))
-                SHDefExtractIconW(expanded,index,0,&raw,nullptr,MAKELONG(48,0));
+            const auto location=path_buffer();int index=0;
+            if(SUCCEEDED(link->GetIconLocation(location.get(),long_path,&index))&&location[0])
+                if(const auto expanded=expand_environment(location.get());!expanded.empty())SHDefExtractIconW(expanded.c_str(),index,0,&raw,nullptr,MAKELONG(48,0));
         }
     }
     if(!raw&&SHGetFileInfoW(path.c_str(),0,&info,sizeof(info),SHGFI_SYSICONINDEX)) {
@@ -83,40 +96,43 @@ NativeIcon read_icon(const std::wstring& path) {
     if(!raw&&SHGetFileInfoW(path.c_str(),0,&info,sizeof(info),SHGFI_ICON|SHGFI_LARGEICON))raw=info.hIcon;
     if(!raw)return {};
     NativeIcon icon(raw,[](void* h){DestroyIcon(static_cast<HICON>(h));});
-    if(cache.size()>=64) cache.clear();
+    if(cache.size()>=64) cache.erase(cache.begin());
     cache.emplace(path,icon); return icon;
 }
 std::wstring link_target(const std::wstring& path) {
     ComPtr<IShellLinkW> link; ComPtr<IPersistFile> file;
     if(FAILED(CoCreateInstance(CLSID_ShellLink,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(link.put()))) ||
        FAILED(link->QueryInterface(IID_PPV_ARGS(file.put()))) || FAILED(file->Load(path.c_str(),STGM_READ))) return {};
-    wchar_t target[32768]{};
-    if(FAILED(link->GetPath(target,32768,nullptr,SLGP_RAWPATH))) return {};
+    const auto buffer=path_buffer();wchar_t* target=buffer.get();
+    if(FAILED(link->GetPath(target,long_path,nullptr,SLGP_RAWPATH))) return {};
     if(!target[0]) {
         ComPtr<IPropertyStore> properties;PROPVARIANT identity{};
         if(SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(properties.put())))&&SUCCEEDED(properties->GetValue(PKEY_AppUserModel_ID,&identity))) {
             const bool explorer=identity.vt==VT_LPWSTR&&identity.pwszVal&&wcscmp(identity.pwszVal,L"Microsoft.Windows.Explorer")==0;
             PropVariantClear(&identity);
-            if(explorer) {wchar_t windows[32768]{};if(GetWindowsDirectoryW(windows,32768))return (std::filesystem::path(windows)/L"explorer.exe").wstring();}
+            if(explorer) {wchar_t windows[MAX_PATH]{};if(GetWindowsDirectoryW(windows,MAX_PATH))return (std::filesystem::path(windows)/L"explorer.exe").wstring();}
         }
     }
-    wchar_t expanded[32768]{};
-    if(ExpandEnvironmentStringsW(target,expanded,32768)) return expanded;
+    if(auto expanded=expand_environment(target);!expanded.empty()) return expanded;
     return target;
 }
+// Per-window icon copies. Entries not seen by the latest enumeration belong to
+// closed windows and are pruned, so the cache never needs a wholesale reset
+// (which would recopy every icon and force the GUI to rebuild its bitmaps).
+struct WindowIconEntry {DWORD pid;DWORD_PTR source;NativeIcon icon;unsigned generation;};
+std::unordered_map<HWND,WindowIconEntry> window_icons;
+unsigned window_icon_generation=0;
 NativeIcon window_icon(HWND window,DWORD pid) {
-    struct Entry {DWORD pid;DWORD_PTR source;NativeIcon icon;};
-    static std::unordered_map<HWND,Entry> cache;
+    auto& cache=window_icons;
     DWORD_PTR value=0;
     SendMessageTimeoutW(window,WM_GETICON,ICON_BIG,GetDpiForWindow(window),SMTO_ABORTIFHUNG|SMTO_BLOCK,20,&value);
     if(!value)value=static_cast<DWORD_PTR>(GetClassLongPtrW(window,GCLP_HICON));
     if(!value)SendMessageTimeoutW(window,WM_GETICON,ICON_SMALL2,GetDpiForWindow(window),SMTO_ABORTIFHUNG|SMTO_BLOCK,20,&value);
     if(!value)return {};
-    if(const auto found=cache.find(window);found!=cache.end()&&found->second.pid==pid&&found->second.source==value)return found->second.icon;
+    if(const auto found=cache.find(window);found!=cache.end()&&found->second.pid==pid&&found->second.source==value){found->second.generation=window_icon_generation;return found->second.icon;}
     const auto copy=CopyIcon(reinterpret_cast<HICON>(value));if(!copy)return {};
     NativeIcon icon(copy,[](void* h){DestroyIcon(static_cast<HICON>(h));});
-    if(cache.size()>=64)cache.clear();
-    cache.insert_or_assign(window,Entry{pid,value,icon});return icon;
+    cache.insert_or_assign(window,WindowIconEntry{pid,value,icon,window_icon_generation});return icon;
 }
 struct Context { DWORD own; std::vector<AppWindow>* output; };
 std::wstring process_app_id(HANDLE process) {
@@ -153,8 +169,8 @@ BOOL CALLBACK enum_window(HWND hwnd, LPARAM param) {
     }
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (process) {
-        wchar_t path[32768]{}; DWORD count = 32768;
-        if (QueryFullProcessImageNameW(process, 0, path, &count)) executable.assign(path, count);
+        const auto path=path_buffer(); DWORD count = long_path;
+        if (QueryFullProcessImageNameW(process, 0, path.get(), &count)) executable.assign(path.get(), count);
         if(app_id.empty())app_id=process_app_id(process);
         CloseHandle(process);
     }
@@ -178,9 +194,9 @@ void shortcuts(REFKNOWNFOLDERID id, bool recursive, std::vector<Shortcut>& outpu
         if (output.size() >= 512) return;
         const auto name = entry.path().filename().wstring();
         if (name == L"desktop.ini" || name.empty() || name[0] == L'.') return;
-        const auto ext = entry.path().extension().wstring();
-        if (recursive && ext != L".lnk" && ext != L".url") return;
-        output.push_back({ ext == L".lnk" || ext == L".url" ? entry.path().stem().wstring() : name, entry.path().wstring(), entry.is_directory(error), {}, {}, {} });
+        const bool link = has_extension(entry.path(), L".lnk") || has_extension(entry.path(), L".url");
+        if (recursive && !link) return;
+        output.push_back({ link ? entry.path().stem().wstring() : name, entry.path().wstring(), entry.is_directory(error), {}, {}, {} });
     };
     if (recursive) {
         std::filesystem::recursive_directory_iterator it(root, std::filesystem::directory_options::skip_permission_denied, error), end;
@@ -209,7 +225,7 @@ void shell_pins(std::vector<Shortcut>& output) {
         Shortcut pin{title,path?path:L"",false,{}, {},id?id:L""};
         CoTaskMemFree(title);CoTaskMemFree(path);CoTaskMemFree(id);
         if(pin.path.empty()||pin.title.empty())continue;
-        const bool link=_wcsicmp(std::filesystem::path(pin.path).extension().c_str(),L".lnk")==0;
+        const bool link=has_extension(pin.path,L".lnk");
         if(link) {pin.target=link_target(pin.path);pin.icon=read_icon(pin.path);}
         if(!pin.app_id.empty()) {
             const auto icon=shell_app_icon(pin.app_id,MulDiv(24,GetDpiForSystem(),96));
@@ -221,7 +237,9 @@ void shell_pins(std::vector<Shortcut>& output) {
 }
 std::vector<AppWindow> collect_windows(DWORD own_pid) {
     std::vector<AppWindow> windows;
+    ++window_icon_generation;
     Context context{own_pid, &windows}; EnumWindows(enum_window, reinterpret_cast<LPARAM>(&context));
+    std::erase_if(window_icons,[](const auto& entry){return entry.second.generation!=window_icon_generation;});
     return windows;
 }
 Inventory collect_inventory(DWORD own_pid) {
@@ -237,11 +255,16 @@ Inventory collect_inventory(DWORD own_pid) {
         std::error_code error;
         for(std::filesystem::directory_iterator it(folder,error),end;it!=end&&!error;it.increment(error)) {
             if(result.pinned.size()>=16) break;
-            if(it->path().extension()==L".lnk") {
+            if(has_extension(it->path(),L".lnk")) {
                 const auto path=it->path().wstring();
                 result.pinned.push_back({it->path().stem().wstring(),path,false,link_target(path),read_icon(path),{}});
             }
         }
+    }
+    apply_pin_preferences(result);
+    for(auto& pin:result.pinned)if(!pin.icon) {
+        if(!pin.app_id.empty())pin.icon=shell_app_icon(pin.app_id,MulDiv(24,GetDpiForSystem(),96));
+        if(!pin.icon)pin.icon=read_icon(pin.path);
     }
     std::sort(result.launcher.begin(), result.launcher.end(), [](const auto& a, const auto& b) { return a.title < b.title; });
     return result;
@@ -250,13 +273,5 @@ bool activate_window(HWND hwnd) {
     if (!IsWindow(hwnd)) return false;
     if (IsIconic(hwnd)) ShowWindowAsync(hwnd, SW_RESTORE);
     return SetForegroundWindow(hwnd) != FALSE;
-}
-HRESULT toggle_desktop() {
-    // Shell.Application is registered in shell32.dll, not as a local EXE server.
-    // Let Explorer implement its native show/restore behavior for this trial.
-    ComPtr<IShellDispatch4> shell;
-    const auto activated=CoCreateInstance(CLSID_Shell,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(shell.put()));
-    if(FAILED(activated))return activated;
-    return shell->ToggleDesktop();
 }
 }

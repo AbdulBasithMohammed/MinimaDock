@@ -11,7 +11,7 @@ function EdgeBounds {
     $scale=[DesktopActionCheck]::GetDpiForWindow($window)/96.0
     if([Math]::Abs(($bounds.Right-$bounds.Left)-(Read 14)*$scale/1000) -gt 1){throw 'Reveal area does not match the current pill width.'}
     $dockBounds=New-Object DesktopActionCheck+Rect;[void][DesktopActionCheck]::GetWindowRect($window,[ref]$dockBounds)
-    if([Math]::Abs(($bounds.Left+$bounds.Right)-($dockBounds.Left+$dockBounds.Right)) -gt 1 -or $bounds.Bottom -ne $dockBounds.Bottom){throw 'Reveal area is not aligned with the pill and screen bottom.'}
+    if([Math]::Abs($bounds.Left-($dockBounds.Left+((Read 47)/1000)*$scale)) -gt 1 -or $bounds.Bottom -ne $dockBounds.Bottom){throw 'Reveal area is not aligned with the pill and screen bottom.'}
     return $bounds
 }
 try {

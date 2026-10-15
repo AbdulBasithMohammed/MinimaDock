@@ -33,17 +33,18 @@ try {
     if([Math]::Abs(($before.Bottom-$before.Top)/$scale-88) -gt 1){throw 'Idle render layer is larger than 88 DIP.'}
     $count=[DockMotionCheck]::Send($window,0x802a,0)
     if([DockMotionCheck]::Send($window,0x802d,0) -ne 44000){throw 'Collapsed pill height is not 44 DIP.'}
+    $compactWidth=[DockMotionCheck]::Send($window,0x8036,0)
+    $compactLeft=[DockMotionCheck]::Send($window,0x8057,0)
+    if([Math]::Abs($compactLeft+$compactWidth/2-($before.Right-$before.Left)/$scale*500) -gt 1000){throw 'Compact app group is not centered.'}
     $positions=@();for($i=0;$i -lt $count;$i++){$positions+=,[DockMotionCheck]::Send($window,0x802b,$i)}
-    $runningSides=@(0,0);$pinSides=@(0,0);$expandedSides=@(0,0)
+    $seenUnpinned=$false
+    $launcher=[DockMotionCheck]::Send($window,0x8056,0)
     for($i=0;$i -lt $count;$i++){
         $flags=[DockMotionCheck]::Send($window,0x802c,$i)
-        $side=if($positions[$i] -lt 0){0}else{1}
-        if(($flags -band 1) -ne 0){$runningSides[$side]++}
-        if(($flags -band 2) -ne 0){$pinSides[$side]++}
-        $expandedSides[$side]++
-    }
-    foreach($sides in @($runningSides,$pinSides,$expandedSides)){
-        if([Math]::Abs($sides[0]-$sides[1]) -gt 1){throw 'Pinned, running, or expanded app subset is unbalanced.'}
+        if(($flags -band 2) -eq 0){$seenUnpinned=$true}
+        elseif($seenUnpinned){throw 'Pinned app appeared after an unpinned running app.'}
+        if($i -gt 0 -and $positions[$i]-$positions[$i-1] -ne 40000){throw 'Apps are not in one ordered row.'}
+        if($positions[$i]+($before.Right-$before.Left)/$scale*500 -le $launcher){throw 'App appeared before the launcher.'}
     }
     [void][DockMotionCheck]::Send($window,0x100,9) # Tab on this test's own HWND.
     if([DockMotionCheck]::Send($window,0x8029,0) -ne 1){throw 'Expansion did not start on input.'}
@@ -51,9 +52,14 @@ try {
     Start-Sleep -Milliseconds 130
     if([DockMotionCheck]::Send($window,0x8029,0) -ne 2){throw 'Expansion did not complete promptly.'}
     if([DockMotionCheck]::Send($window,0x802d,0) -ne 44000){throw 'Expanded pill height changed.'}
+    if([DockMotionCheck]::Send($window,0x8056,0) -ne $launcher -or ([DockMotionCheck]::Bounds($window)).Left -ne $before.Left){throw 'Hover moved the launcher screen position.'}
+    $expandedWidth=[DockMotionCheck]::Send($window,0x8036,0)
+    $expandedLeft=[DockMotionCheck]::Send($window,0x8057,0)
+    if($expandedLeft -ge $compactLeft -or $expandedLeft+$expandedWidth -le $compactLeft+$compactWidth){throw 'Hover did not expand both wings.'}
+    if([Math]::Abs(($compactLeft-$expandedLeft)-($expandedWidth-$compactWidth)/2) -gt 1000){throw 'Hover wings are not symmetric.'}
     for($i=0;$i -lt $count;$i++){
         $expanded=[DockMotionCheck]::Send($window,0x802b,$i)
-        if($positions[$i] -ne $expanded){throw 'An app moved while revealing utility wings.'}
+        if($positions[$i] -ne $expanded){throw 'An app moved while revealing utility controls.'}
     }
     for($left=0;$left -lt 6;$left++){[void][DockMotionCheck]::Send($window,0x100,37)} # Pass media, Show desktop and calendar to select quick settings.
     [void][DockMotionCheck]::Send($window,0x100,13)
@@ -66,10 +72,10 @@ try {
     if([DockMotionCheck]::Send($window,0x8029,0) -ne 3){throw 'Collapse did not start immediately.'}
     Start-Sleep -Milliseconds 130
     if([DockMotionCheck]::Send($window,0x8029,0) -ne 0){throw 'Collapse did not finish promptly.'}
-    for($i=0;$i -lt $count;$i++){if([DockMotionCheck]::Send($window,0x802b,$i) -ne $positions[$i]){throw 'An app moved while hiding utility wings.'}}
+    for($i=0;$i -lt $count;$i++){if([DockMotionCheck]::Send($window,0x802b,$i) -ne $positions[$i]){throw 'An app moved while hiding utility controls.'}}
     [void][DockMotionCheck]::Send($window,0x10,0)
     if(-not $process.WaitForExit(10000) -or $process.ExitCode -ne 0){throw 'Own dock did not close cleanly.'}
-    'Desktop component passed: balanced pinned/running/all-app subsets, immediate transitions, fixed app coordinates across hover, narrow render layer, fixed bottom anchor, quick settings open/close, clean shutdown. Explorer taskbar untouched.'
+    'Desktop component passed: left launcher, pinned-first app order, immediate transitions, fixed app coordinates across hover, narrow render layer, fixed bottom anchor, quick settings open/close, clean shutdown. Explorer taskbar untouched.'
 } finally {
     $process.Refresh();if(-not $process.HasExited){Stop-Process -Id $process.Id -Force}
     $process.Dispose()

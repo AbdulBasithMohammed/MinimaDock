@@ -4,7 +4,19 @@
 
 namespace minima {
 void ClickPulse::tick(Time now){if(active())progress_=std::clamp(static_cast<float>(now-start_)/240,0.0f,1.0f);}
-void PanelReveal::tick(Time now){if(active())progress_=std::clamp(static_cast<float>(now-start_)/180,0.0f,1.0f);}
+float ClickPulse::scale() const{return active()?1-.06f*std::cos(progress_*6.2831853f)*std::exp(-6*progress_):1;}
+void PanelReveal::transition(bool opening,Time now,bool reduced){
+    tick(now);const float desired=opening?1.0f:0.0f;
+    if(reduced){value_=target_=desired;moving_=false;return;}
+    if(target_==desired&&moving_)return;
+    from_=value_;target_=desired;start_=now;duration_=opening?180:150;moving_=from_!=target_;
+}
+void PanelReveal::tick(Time now){
+    if(!moving_)return;
+    const auto t=std::clamp(static_cast<float>(now-start_)/duration_,0.0f,1.0f);
+    const auto ease=1-(1-t)*(1-t)*(1-t);value_=from_+(target_-from_)*ease;
+    if(t==1){value_=target_;moving_=false;}
+}
 void DockVisibility::update(bool maximized,bool fullscreen,bool engaged,Time now) {
     tick(now);
     const float desired=!fullscreen&&(!maximized||engaged)?1.0f:0.0f;

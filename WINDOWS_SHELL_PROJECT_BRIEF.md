@@ -23,12 +23,12 @@ No implementation, shell change, recovery utility, performance measurement, or c
 
 ### 2.1 Collapsed taskbar
 
-- Bottom-center placement, with a Windows-symbol button on each monitor.
+- Place the compact launcher/app group at bottom-center. The crossed-swords launcher is first within that group, followed by apps. Per-monitor support remains a production requirement.
 - With no pinned or running apps, retain the launcher and the small Show desktop control.
 - All pinned applications and running/minimized applications appear beside the launcher even while the taskbar is collapsed, deduplicated when a pinned app is also running.
 - Keep app icons fully visible, clickable and in the exact same positions while hovering expands or collapses the utility wings. Running indicators change without adding another icon for an opened pin.
 - Keep the collapsed appearance visually light; avoid drawing an empty full-width panel.
-- The launcher stays at the exact center; app slots are balanced on either side, preserving established positions whenever rebalancing is unnecessary.
+- Order from left to right: launcher, pinned apps in saved taskbar order, then unpinned running apps in established order. Opening a pinned app updates its indicator without moving or duplicating it.
 
 ### 2.2 Expanded pill
 
@@ -39,7 +39,7 @@ Hovering over the collapsed button/app group expands it into a rounded glass pil
 3. A left wing with general media playback controls and the current title.
 4. A right wing with quick settings, system tray access and the clock/calendar button.
 
-Hover expansion reveals only these utility wings; it does not reveal additional app icons or rearrange the app strip.
+Hover expansion extends equally left and right to reveal these utility controls; it does not reveal additional app icons or rearrange the app strip.
 
 Detailed controls can open anchored flyouts above the pill. Avoid cramming connection lists and tray menus into one horizontal strip. Adapt to available monitor width with overflow instead of clipping.
 
@@ -395,7 +395,7 @@ Deliver source, reproducible build instructions, packaged application, recovery 
 - [ ] Recovery exists first and restores the captured previous desktop configuration.
 - [ ] Original Explorer taskbar is absent rather than hidden.
 - [ ] No Explorer taskbar returns after File Explorer/Recycle Bin/This PC launches.
-- [ ] Button is bottom-center on each monitor; running/minimized apps remain beside it.
+- [ ] Compact pill starts at bottom-center on each monitor; launcher comes first, then pinned apps and unpinned running/minimized apps.
 - [ ] Hover expands pinned apps, media controls, and system access without stealing focus.
 - [ ] Dark glass appearance is smooth and passes the performance gate.
 - [ ] Desktop icons preserve original files, launch normally, and reveal labels accessibly.

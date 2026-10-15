@@ -53,14 +53,15 @@ private:
 };
 class CalendarSlide {
 public:
+    static constexpr float distance=252; // Six 42 DIP rows; motion is vertical.
     using Time=std::int64_t;
     void start(int direction,Time now,bool reduced=false){direction_=direction<0?-1:1;start_=now;progress_=reduced?1.0f:0.0f;}
     void tick(Time now){if(active())progress_=std::clamp(static_cast<float>(now-start_)/200,0.0f,1.0f);}
     void settle(){progress_=1;}
     bool active() const{return progress_<1;}
     float blend() const{return 1-(1-progress_)*(1-progress_)*(1-progress_);}
-    float old_offset() const{return -direction_*320*blend();}
-    float new_offset() const{return direction_*320*(1-blend());}
+    float old_offset() const{return -direction_*distance*blend();}
+    float new_offset() const{return direction_*distance*(1-blend());}
 private:
     Time start_=0;
     float progress_=1;

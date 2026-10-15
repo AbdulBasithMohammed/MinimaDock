@@ -16,6 +16,9 @@ function OpenCalendar {
 }
 function Settled {Await {(ReadCalendar 4) -eq 0 -and (ReadCalendar 5) -eq 1000 -and (ReadCalendar 8) -eq 0} 'Calendar animation did not settle.'}
 try {
+ $fixture=[DesktopActionCheck]::Fixture()
+ for($attempt=0;$attempt -lt 3 -and [DesktopActionCheck]::GetForegroundWindow() -ne $fixture;$attempt++){[void][DesktopActionCheck]::ActivateOwnFixture($fixture);Start-Sleep -Milliseconds 100}
+ if([DesktopActionCheck]::GetForegroundWindow() -ne $fixture){throw 'Could not activate blank calendar fixture.'}
  $process=Start-Process -FilePath ([IO.Path]::GetFullPath($Executable)) -ArgumentList '--dock' -WindowStyle Hidden -PassThru
  Await {$script:window=[DesktopActionCheck]::Find($process.Id);$window -ne [IntPtr]::Zero -and (ReadDock 0) -eq 1} 'Dock not ready.'
  [void][DesktopActionCheck]::Send($window,0x100,9,0)
@@ -23,6 +26,7 @@ try {
  $anchor=ReadDock 16;$allocations=ReadDock 17
  $bounds=New-Object DesktopActionCheck+Rect;[void][DesktopActionCheck]::GetWindowRect($window,[ref]$bounds)
  OpenCalendar
+ if((ReadCalendar 15) -ne 2){throw 'Calendar navigation does not use the vertical axis.'}
  if((ReadDock 19) -ne 4){throw 'Calendar activation lost its flyout hold.'}
  Settled
  $popup=New-Object DesktopActionCheck+Rect;[void][DesktopActionCheck]::GetWindowRect($calendar,[ref]$popup)
@@ -67,12 +71,15 @@ try {
  $after=New-Object DesktopActionCheck+Rect;[void][DesktopActionCheck]::GetWindowRect($window,[ref]$after)
  if($after.Left -ne $bounds.Left -or $after.Top -ne $bounds.Top -or $after.Bottom -ne $bounds.Bottom){throw 'Calendar moved or resized the dock window.'}
  [void][DesktopActionCheck]::Send($calendar,0x100,27,0)
+ if((ReadDock 24) -eq 0){
+  Start-Sleep -Milliseconds 40
+  if((ReadCalendar 11) -ne 1 -or (ReadCalendar 5) -le 0 -or (ReadCalendar 5) -ge 1000 -or (ReadCalendar 13) -ge 1000 -or (ReadCalendar 14) -le 0){throw 'Calendar close did not present a fading, contracting exit frame.'}
+ }
  Await {[DesktopActionCheck]::FindClass($process.Id,'MinimaDock.Calendar') -eq [IntPtr]::Zero -and (ReadDock 19) -eq 0} 'Escape did not close calendar and release flyout.'
  OpenCalendar;Settled
  Click $window ((ReadDock 25)/1000.0) ((ReadDock 7)/1000.0)
  Await {[DesktopActionCheck]::FindClass($process.Id,'MinimaDock.Calendar') -eq [IntPtr]::Zero -and (ReadDock 19) -eq 0} 'Clock click did not toggle calendar closed.'
  OpenCalendar;Settled
- $fixture=[DesktopActionCheck]::Fixture()
  for($attempt=0;$attempt -lt 3 -and [DesktopActionCheck]::GetForegroundWindow() -ne $fixture;$attempt++){[void][DesktopActionCheck]::ActivateOwnFixture($fixture);Start-Sleep -Milliseconds 100}
  if([DesktopActionCheck]::GetForegroundWindow() -ne $fixture){throw ('Could not activate owned outside-click fixture: '+[DesktopActionCheck]::State($fixture))}
  try {Await {[DesktopActionCheck]::FindClass($process.Id,'MinimaDock.Calendar') -eq [IntPtr]::Zero -and (ReadDock 19) -eq 0} 'Outside activation did not dismiss calendar.'}

@@ -22,6 +22,9 @@ credentials.local.json
 .idea/
 .codex/
 .agents/
+# Private project context for local coding assistants.
+/AGENTS.md
+/CLAUDE.md
 *.pdb
 *.dmp
 *.log

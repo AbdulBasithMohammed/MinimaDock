@@ -42,7 +42,6 @@ if($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
 if($LASTEXITCODE -ne 0){throw 'Original shell recovery baseline could not be verified.'}
 $previous=Get-Deployment
 $previousRecord=if(Test-Path -LiteralPath $activeFile){Get-Content -LiteralPath $activeFile -Raw}else{$null}
-if($previous){$code=Invoke-Decision $previous 'revert';if($code -ne 0){throw 'Previous deployment could not be reverted; new deployment cancelled.'}}
 $source=$out
 foreach($name in @('MinimaDock.exe','MinimaDockTrial.exe')){if(-not(Test-Path -LiteralPath (Join-Path $source $name))){throw ('Build missing: '+$name)}}
 $directory=Join-Path $deployRoot ((Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString('N').Substring(0,8))
@@ -52,6 +51,11 @@ foreach($name in @('MinimaDock.exe','MinimaDockTrial.exe')){
     if((Get-FileHash -LiteralPath (Join-Path $source $name)).Hash -cne (Get-FileHash -LiteralPath (Join-Path $directory $name)).Hash){throw 'Deployment copy verification failed.'}
 }
 $guard=Join-Path $directory 'MinimaDockTrial.exe'
+# Probe this exact copied executable before reverting the previous dock or
+# publishing a new recovery pointer. A policy block cannot strand an old trial.
+. (Join-Path $PSScriptRoot 'Dock-LaunchCheck.ps1')
+Assert-DockLaunchable (Join-Path $directory 'MinimaDock.exe')
+if($previous){$code=Invoke-Decision $previous 'revert';if($code -ne 0){throw 'Previous deployment could not be reverted; new deployment cancelled.'}}
 $record=[ordered]@{Format='MinimaDockTaskbarTest/1';Directory=$directory;GuardSha256=(Get-FileHash -LiteralPath $guard).Hash;DockSha256=(Get-FileHash -LiteralPath (Join-Path $directory 'MinimaDock.exe')).Hash;Created=(Get-Date).ToString('o');TrialSeconds=$Seconds}
 $temp=$activeFile+'.tmp'
 [IO.File]::WriteAllText($temp,($record|ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))

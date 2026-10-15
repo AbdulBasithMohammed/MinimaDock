@@ -85,6 +85,12 @@ int main(int argc,char** argv){
         if(!controller.command(MediaCommand::Previous,snapshot))throw std::runtime_error("Previous command was rejected.");
         await([&]{return received==2&&controller.snapshot().title==L"MinimaDock isolated media fixture 1";},"Previous/title event failed.");
         if(!controller.command(MediaCommand::Pause,snapshot))throw std::runtime_error("Pause command was rejected.");
+        if(controller.snapshot().playing)throw std::runtime_error("Pause icon did not swap synchronously.");
+        // Do not pump the owned provider's command message yet. PlaybackInfo
+        // remains Playing while the worker receives/acknowledges the request.
+        Sleep(250);
+        MediaPlaybackStatus delayed_status{};require(transport->get_PlaybackStatus(&delayed_status));
+        if(delayed_status!=MediaPlaybackStatus_Playing||controller.snapshot().playing)throw std::runtime_error("Delayed provider reversed immediate pause feedback.");
         await([&]{MediaPlaybackStatus status{};transport->get_PlaybackStatus(&status);const auto current=controller.snapshot();return received==3&&status==MediaPlaybackStatus_Paused&&(!current.playing||current.source!=snapshot.source);},"Pause did not reach own SMTC/event update.");
         if(controller.snapshot().source!=snapshot.source){
             if(controller.command(MediaCommand::Toggle,snapshot))throw std::runtime_error("Handoff accepted a stale player command.");
@@ -93,6 +99,7 @@ int main(int argc,char** argv){
             throw HandoffChecked{};
         }
         if(!controller.command(MediaCommand::Play,snapshot))throw std::runtime_error("Play command was rejected.");
+        if(!controller.snapshot().playing)throw std::runtime_error("Play icon did not swap synchronously.");
         await([&]{return received==4&&controller.snapshot().playing;},"Play did not reach own SMTC/event update.");
         if(argc==2){dock.open(argv[1]);dock.title(1);const auto anchor=dock.read(16),allocations=dock.read(17);
             if(dock.read(27)!=31)throw std::runtime_error("Dock did not reflect media capabilities/playing state.");
@@ -108,6 +115,9 @@ int main(int argc,char** argv){
         require(transport->put_IsNextEnabled(false));await([&]{return !controller.snapshot().next;},"Disabled capability event failed.");
         if(controller.command(MediaCommand::Next,snapshot))throw std::runtime_error("Disabled next command was accepted.");
         if(dock.window){await([&]{return (dock.read(27)&16)==0;},"Dock next stayed enabled.");const auto before=received.load();dock.click(2);Sleep(100);if(received!=before)throw std::runtime_error("Disabled dock button dispatched a command.");}
+        const auto before_rapid=received.load();
+        if(!controller.command(MediaCommand::Pause,snapshot)||controller.snapshot().playing||!controller.command(MediaCommand::Play,snapshot)||!controller.snapshot().playing)throw std::runtime_error("Rapid clicks did not show the latest intent immediately.");
+        await([&]{MediaPlaybackStatus status{};transport->get_PlaybackStatus(&status);return received==before_rapid+2&&status==MediaPlaybackStatus_Playing&&controller.snapshot().playing;},"Rapid pause/play requests were dropped or reordered.");
         require(transport->put_PlaybackStatus(MediaPlaybackStatus_Closed));require(transport->put_IsEnabled(false));
         await([&]{const auto s=controller.snapshot();return !s.available||s.source!=snapshot.source;},"Closed fixture stayed selected as active media.");
         if(controller.command(MediaCommand::Toggle,snapshot))throw std::runtime_error("Closed/stale media session accepted a command.");

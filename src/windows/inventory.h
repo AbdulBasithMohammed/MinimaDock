@@ -11,5 +11,4 @@ struct Inventory { std::vector<AppWindow> windows; std::vector<Shortcut> desktop
 Inventory collect_inventory(DWORD own_pid);
 std::vector<AppWindow> collect_windows(DWORD own_pid);
 bool activate_window(HWND hwnd);
-HRESULT toggle_desktop();
 }
