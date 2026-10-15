@@ -14,7 +14,7 @@ int run_quick_settings_report(const wchar_t* report) {
     for(int i=0;i<40;++i){Sleep(250);s=connectivity.snapshot();if(i>=12&&(s.wifi_present||s.bluetooth_present))break;}
     UpdateStatus u;for(int i=0;i<80&&!(u=updates.status()).known;++i)Sleep(250);
     // Prayer times: a real download from the configured masjid website.
-    PrayerService prayers;prayers.start(nullptr,load_prayer_settings().website);prayers.refresh(true);
+    PrayerService prayers;prayers.start(nullptr,load_prayer_settings());prayers.refresh(true);
     PrayerSnapshot p;for(int i=0;i<120;++i){Sleep(250);p=prayers.snapshot();if(!p.updated.empty()&&(p.day.year||!p.error.empty()))break;}
     prayers.stop();
     size_t switchable=0,connected=0,saved=0;

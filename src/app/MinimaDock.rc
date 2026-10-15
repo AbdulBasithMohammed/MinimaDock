@@ -4,8 +4,8 @@
 #include <winver.h>
 #include <winuser.h>
 
-#define MINIMA_VERSION 0,2,57,0
-#define MINIMA_VERSION_TEXT "0.2.57.0"
+#define MINIMA_VERSION 1,0,0,0
+#define MINIMA_VERSION_TEXT "1.0.0.0"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
 

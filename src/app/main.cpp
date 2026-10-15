@@ -2,6 +2,7 @@
 #include "rendering/calendar.h"
 #include "rendering/glass.h"
 #include "rendering/prayer_toast.h"
+#include "rendering/customize.h"
 #include "windows/jump_lists.h"
 #include "windows/connectivity.h"
 #include <shellapi.h>
@@ -11,8 +12,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const auto hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(hr)) return 1;
-    int count = 0; auto args = CommandLineToArgvW(GetCommandLineW(), &count);
+    int count = 0; auto args = CommandLineToArgvW(GetCommandLineW(), &count); const auto all_args = args;
     int result = 0;
+    // --over-desktop first: render the following snapshot mode over a transparent desktop.
+    if (count >= 4 && wcscmp(args[1], L"--over-desktop") == 0) { minima::snapshot_over_desktop(true); ++args; --count; }
     if (count == 3 && wcscmp(args[1], L"--snapshot") == 0) result = minima::save_preview_snapshot(args[2], true);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-collapsed") == 0) result = minima::save_preview_snapshot(args[2], false);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-settings") == 0) result = minima::save_preview_snapshot(args[2], true,1);
@@ -47,6 +50,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     else if (count == 3 && wcscmp(args[1], L"--snapshot-launcher-emoji") == 0) result = minima::save_preview_snapshot(args[2], true,22);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-launcher-command") == 0) result = minima::save_preview_snapshot(args[2], true,23);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-launcher-windows") == 0) result = minima::save_preview_snapshot(args[2], true,24);
+    else if ((count == 3 || count == 4) && wcscmp(args[1], L"--snapshot-customize") == 0) result = minima::save_customize_snapshot(args[2], count == 4 ? _wtoi(args[3]) : 0);
+    else if (count == 3 && wcscmp(args[1], L"--snapshot-bar") == 0) result = minima::save_preview_snapshot(args[2], true,25);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-prayer-toast") == 0) result = minima::save_prayer_toast_snapshot(args[2], false);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-prayer-toast-pill") == 0) result = minima::save_prayer_toast_snapshot(args[2], true);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-prayer-toast-compare") == 0) result = minima::save_prayer_toast_compare(args[2]);
@@ -60,5 +65,5 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         MessageBoxW(nullptr, L"This build contains a framed design preview. Shell activation is disabled until the recovery, compatibility, and performance gates pass.\n\nUse --preview.", L"MinimaDock", MB_OK | MB_ICONINFORMATION);
         result = 2;
     }
-    LocalFree(args); CoUninitialize(); return result;
+    LocalFree(all_args); CoUninitialize(); return result;
 }

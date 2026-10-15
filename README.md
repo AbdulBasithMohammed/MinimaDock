@@ -1,68 +1,157 @@
+<div align="center">
+
+<img src="docs/images/logo.svg" width="96" height="96" alt="MinimaDock logo">
+
 # MinimaDock
 
-A native C++20 Windows 11 shell project: a small centered glass pill that expands on hover, with a minimal desktop and familiar app access. [The project brief](WINDOWS_SHELL_PROJECT_BRIEF.md) is the product specification.
+**A calm, glassy dock that replaces the Windows 11 taskbar.**<br>
+Your apps, a fast local launcher, media, quick settings, calendar and prayer times, in one small pill.
 
-**Current build: native design preview and guarded temporary desktop taskbar test.** The user approved an Explorer-backed temporary test on October 10, 2026. Explorer-free shell replacement and automatic startup remain unavailable. See [deploy/keep/revert instructions](docs/taskbar-test.md).
+[![Latest release](https://img.shields.io/github/v/release/AbdulBasithMohammed/MinimaDock?style=flat-square&color=f0c36b&label=release)](https://github.com/AbdulBasithMohammed/MinimaDock/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/AbdulBasithMohammed/MinimaDock/total?style=flat-square&color=5fd1c0)](https://github.com/AbdulBasithMohammed/MinimaDock/releases)
+[![Windows 11](https://img.shields.io/badge/Windows-11%20x64-4f8ff7?style=flat-square&logo=windows11&logoColor=white)](#requirements)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-b49cf2?style=flat-square&logo=cplusplus&logoColor=white)](docs/development.md)
+[![License: MIT](https://img.shields.io/github/license/AbdulBasithMohammed/MinimaDock?style=flat-square&color=8fe0a0)](LICENSE)
 
-Run `out\Deploy-Taskbar.cmd` for a ten-minute trial. **Ctrl+Alt+Backspace** or `out\Revert-Taskbar.cmd` restores the Windows taskbar. **Ctrl+Alt+K** or `out\Keep-Taskbar.cmd` keeps this session's test, with crash/hang supervision active.
+### [⬇&nbsp; Download for Windows 11](https://github.com/AbdulBasithMohammed/MinimaDock/releases/latest)
 
-Maximized windows and full-height snapped panes extend to the bottom behind the floating pill. Snapped panes retain their chosen widths and original restore placement. The trial journals the original taskbar work area and restores it with Revert, timeout or crash recovery.
+<sub>Free and open source · No account · Nothing sent online · Uninstalls in one click</sub>
 
-With a maximized or snapped app, the pill slides/fades out so it cannot cover app controls. A subtle rounded line at the bottom marks the hidden pill's full width; hover anywhere along it or press **Ctrl+Alt+Space** to reveal. The line fades away as the pill appears, and its activation area follows the pill's width as it expands. Open menus keep it visible; Escape closes keyboard interaction and returns focus. The desktop and ordinary windows keep the collapsed dock visible.
+<br>
 
-The expanded pill's Show desktop sliver delegates desktop/restore to Windows during the Explorer-backed trial, including fullscreen games. It is hidden and inactive in the compact pill, which has equal padding around the first and last icons. The Explorer-free fallback uses an in-memory list of minimized windows. The Windows command adapter remains a compatibility dependency that needs validation on other Windows builds.
+<img src="docs/images/hero.png" alt="MinimaDock: the dock, the launcher searching emoji, and the Adhan card" width="900">
 
-App icons, media buttons, system tray, Wi-Fi/sound, clock and Show Desktop share a soft 240 ms press and bubble pop while actions proceed immediately. Flyouts lift, scale and fade in over 180 ms and close over 150 ms; clicking again reverses the transition. Outside clicks, Escape and switching apps also dismiss flyouts, including nonactivating interactions. Effects respect reduced motion and stop repainting when finished. Other applications keep Windows' native opening and restore behavior.
+</div>
 
-Right-click an app for a Windows-style Jump List with that app's own tasks and recent/pinned items, plus launch, pin/unpin and close; it follows the system light or dark theme. Shift+right-click opens the window's native commands. Pin overrides are saved under `HKCU\Software\MinimaDock\Pins`; they affect MinimaDock without changing Explorer's pins. Right-click the launcher for Settings, Task Manager, File Explorer and Terminal; Wi-Fi/sound for network/audio settings; the clock for date/time and notifications; empty pill space for Task Manager, Windows taskbar settings and trial recovery. Shift+F10 or the Menu key also opens the focused item's menu. Tray icons continue to call their original app-specific handlers.
+<br>
 
-The tray arrow uses the app icons' rounded hover highlight and two DIP lift. Wi-Fi and sound share one quick settings button: hovering either icon highlights the pair and lifts both together. Reduced motion keeps the highlight without lifting.
+## ✨ Highlights
 
-Quick settings has Wi-Fi and Bluetooth toggles with › pages for networks and devices (as in Windows), microphone mute, NVIDIA Instant Capture, a timer with an alarm, Windows Update status and the volume slider. The clock's second line shows the next prayer from the configured masjid website; the calendar adds that day's Adhan and Iqama times, and a chime and reminder mark each Adhan.
+<table>
+<tr>
+<td width="50%" valign="top">
 
-## Launcher
+### 🪟 A dock, not a taskbar
+A compact glass pill holds your pinned and open apps. Hover and it grows into media controls, quick settings and the clock. It slides away over maximized and full-screen windows, and comes back when you need it.
 
-Click the MinimaDock button, or tap the Windows key in the live dock, to open the launcher centered above the dock. It searches locally only: your apps (Windows' All apps list), open windows, files (Recent items and the Windows Search index), dock actions, Settings pages and quick answers such as `12*7`, `15% of 80`, `5 km in mi` or `days until dec 25`. Typing never sends anything online and no web results or ads appear. `>` runs a PowerShell command, `:` finds emoji, and `yt`, `g`, `gh`, `wiki` or `maps` followed by words (or a typed web address) open the browser when you press Enter.
+</td>
+<td width="50%" valign="top">
 
-Up/Down move, Enter opens, Shift+Enter runs as administrator, Tab or right-click shows actions (show in folder, copy path, properties, snap or close a window, and more), Esc clears then closes. The empty launcher shows quick actions, recent apps and files, and a glance at Wi-Fi, Bluetooth, volume, battery, updates and the next prayer. Lock acts at once; Sleep, Restart, Shut down and Sign out need a short hold and give a five-second countdown you can cancel. Windows-key shortcuts such as Win+E keep working, full-screen games keep Windows' Start, and the launcher can switch the key back to Start ("Windows key opens Start"); Ctrl+Esc always opens Start.
+### 🔎 A launcher that stays on your PC
+Tap the **Windows key** to search apps, open windows, files and Settings. Do quick sums (`15% of 80`, `5 km in mi`), find emoji (`:heart`), run commands (`>`), or jump to the web (`yt`, `g`, `gh`, `wiki`, `maps`). Nothing you type leaves your PC.
 
-The tray arrow opens MinimaDock's own animated dark glass panel above the button. It receives actual notification icons and calls each app's original activation/context-menu handler, including custom tray utilities. Its title and hover labels share Bahnschrift Light with the clock and calendar. Tab/arrows select icons; Enter/Space activates, Shift+F10 requests the original menu, Escape closes, and large icon sets scroll. During temporary trials, notifications are mirrored to Explorer to preserve Revert and crash recovery. Applications re-register through TaskbarCreated; an app that ignores that message may need to be restarted. Explorer-free startup and independent notifications remain separate work.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
 
-The left wing controls the current [Windows media session](https://learn.microsoft.com/en-us/uwp/api/windows.media.control.globalsystemmediatransportcontrolssessionmanager): previous, play/pause and next, with the current title in Bahnschrift Light. It works with participating players and browsers without a Spotify account or API key. Unsupported buttons are disabled and explain their unavailable state on hover; no active session shows "No media." Previous/play/next have separate, wider click areas beneath the title. Overflowing titles scroll gently while the pill is fully expanded, with reading pauses at both ends; reduced motion keeps a static trimmed title. Hover the title to see the artist. Media updates run on a background worker; the title timer runs only for visible overflowing text.
+### 🕌 Prayer times built in
+Point it at your masjid's website and the clock shows the next prayer. At each Adhan a small card (even over games) counts down to Iqama with a gentle chime. Works with GalaxyStream, Masjidal / Athan+, Mawaqit and most timetable pages.
 
-Click the time/date to open a calendar centered above that button, with the same charcoal glass as the dock's other flyouts. Dock and calendar text use the clock's Bahnschrift Light font, with a shared fallback when unavailable. Up/down month arrows and the scroll wheel navigate with a short vertical slide animation; Today returns to the current local date. Page Up/Down changes months, arrow keys select dates, Home returns to today, and Escape or clicking outside closes it. The calendar holds the dock visible through its closing animation and respects reduced motion.
+</td>
+<td width="50%" valign="top">
 
-## Run the preview
+### 🎨 Yours to tune
+Theme, accent colour, glass tint and strength, icon size, magnification, motion, 12/24-hour clock, and a **full-width bar** style if you prefer a classic taskbar. Every change applies instantly.
 
-Open `out\MinimaDock.exe` for the framed preview. The compact dock shows all pinned and open/minimized apps, deduplicated after the MinimaDock launcher at the start of the centered app group, with pinned apps in their saved order followed by unpinned running apps. Hover expands both sides to show media on the left and system/time/calendar controls on the right; every app stays fully visible and at the same coordinates. Click the launcher to search apps, files and settings (see Launcher above). The original MinimaDock mark (three rounded bars forming an M, standing on a dock bar) is drawn as a cached 24 DIP native vector inside the existing 44 DIP button. Click apps to launch/activate; grouped windows use a selector. The right wing opens quick settings; the deployed desktop dock also includes the custom tray.
+</td>
+</tr>
+</table>
 
-Preview desktop entries come from actual Desktop/public Desktop folders; double-click opens the original item. It displays up to eight desktop items; app capacity follows monitor width with overflow only at the physical limit. Native icons are extracted when available. Traditional pins merge with matching running executables. Complete packaged identity, desktop keyboard navigation and UI Automation remain unfinished.
+## 📸 A closer look
 
-Keyboard: Tab/left/right focus dock controls, including media buttons; Enter/Space activate, Escape closes the flyout first. `F` simulates fullscreen suppression inside the preview; `R` toggles reduced motion. The framed preview does not hook the Windows key; only the live dock does. Explorer-free third-party tray hosting is pending; disabled/pending features never issue fake OS operations.
+<table>
+<tr>
+<td align="center" width="50%"><img src="docs/images/quick-settings.png" alt="Quick settings: Wi-Fi networks"><br><sub><b>Quick settings</b>: Wi-Fi, Bluetooth, volume, timer, updates</sub></td>
+<td align="center" width="50%"><img src="docs/images/prayer.png" alt="Calendar with prayer times and the Adhan card"><br><sub><b>Calendar and prayers</b>: Adhan and Iqama at a glance</sub></td>
+</tr>
+<tr>
+<td align="center" width="50%"><img src="docs/images/customize.png" alt="Customize MinimaDock window"><br><sub><b>Customize</b>: right-click the dock</sub></td>
+<td align="center" width="50%"><img src="docs/images/styles.png" alt="Floating dock and full-width bar styles"><br><sub><b>Two styles</b>: floating pill or full-width bar</sub></td>
+</tr>
+</table>
 
-## Recovery first
+## 🚀 Install
 
-The existing baseline is at `recovery-bundle\baseline.json`. Keep the entire bundle, including the manifest, journal, scripts and launcher. It must stay on local storage and survive builds/cleanup. A fresh backup can be prepared in a new, stable directory:
+1. **Download** `MinimaDock-<version>.zip` from the [latest release](https://github.com/AbdulBasithMohammed/MinimaDock/releases/latest).
+2. **Extract** it (right-click > *Extract All*).
+3. Double-click **`Install MinimaDock.cmd`**.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Prepare-Recovery.ps1 -Destination 'C:\YourLocalFolder\MinimaDock-Recovery'
-```
+That's it. MinimaDock starts right away and every time you sign in. No administrator rights needed.
 
-This captures state and creates files; it does not activate the shell. Existing backups are never overwritten. See [recovery instructions](docs/recovery.md) for the Task Manager route, verification and current limits.
+> [!NOTE]
+> MinimaDock is not code-signed yet. Windows may say *"Windows protected your PC"*: choose **More info > Run anyway**. If **Smart App Control** blocks it, the installer stops and changes nothing.
 
-## Build and validation
+### Uninstall
 
-Preferred toolchain: Visual Studio 2022 C++ build tools, Windows SDK, CMake 3.24+, x64 or ARM64 selected for the target machine. [Development instructions](docs/development.md) also document the verified portable LLVM toolchain used for this first x64 build.
+Double-click **`Uninstall MinimaDock.cmd`**, or go to **Settings > Apps > Installed apps > MinimaDock > Uninstall**. The Windows taskbar comes straight back. Your settings are kept in case you return.
+
+### Requirements
+
+- Windows 11, 64-bit (x64)
+- A normal user account (no admin needed)
+
+## ⌨️ Handy shortcuts
+
+| Shortcut | What it does |
+| --- | --- |
+| <kbd>Win</kbd> | Open the launcher (Win + another key still works as usual) |
+| <kbd>Ctrl</kbd> + <kbd>Esc</kbd> | Open the Windows Start menu |
+| <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Space</kbd> | Show a hidden dock |
+| <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Backspace</kbd> | Bring back the Windows taskbar until you sign in again |
+| <kbd>Tab</kbd> / right-click in the launcher | Actions for the selected result |
+| <kbd>Shift</kbd> + <kbd>Enter</kbd> | Run the selected app as administrator |
+
+## 🛟 Safe by design
+
+- **Nothing is removed.** Explorer keeps running; MinimaDock only hides its taskbar while it runs.
+- **Always recoverable.** The original taskbar state is saved before anything is hidden and restored on uninstall, sign-out, a crash or even a power cut.
+- **Self-healing.** If the dock crashes it restarts by itself; if it keeps failing, your Windows taskbar comes back automatically.
+- **Private.** Searches stay on your PC. The only internet requests are the prayer-times website you choose (and the widget hosts it names).
+
+## ❓ FAQ
+
+<details>
+<summary><b>Does it replace Explorer or change system settings?</b></summary>
+<br>
+No. It installs to <code>%LOCALAPPDATA%\Programs\MinimaDock</code> and adds itself to your sign-in startup. File Explorer, the desktop, Start and notifications keep working. No services, drivers or admin rights.
+</details>
+
+<details>
+<summary><b>How do I set up prayer times?</b></summary>
+<br>
+Right-click empty space on the dock > <b>Customize MinimaDock</b> > <b>Prayer times</b>, and paste your masjid's website. MinimaDock tries several ways of reading it and checks the times make sense. If the site can't be read it can calculate Adhan times for your location. Until you add a website, no prayer times are shown.
+</details>
+
+<details>
+<summary><b>Windows Smart App Control blocked it. What now?</b></summary>
+<br>
+Smart App Control only allows apps it trusts, and MinimaDock is a new, unsigned app. The installer detects the block and leaves your PC unchanged. Whether to change Smart App Control is your call; MinimaDock never changes it for you.
+</details>
+
+<details>
+<summary><b>How do I go back to the normal taskbar?</b></summary>
+<br>
+For this session: <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Backspace</kbd>, or right-click the dock > <b>Return to the Windows taskbar</b>. To stop it starting with Windows: Customize > About > <b>Start with Windows</b>. To remove it completely: run <b>Uninstall MinimaDock.cmd</b>.
+</details>
+
+## 🛠️ Build from source
+
+MinimaDock is native C++20 with Direct2D, DirectWrite and DirectComposition. No frameworks, no runtime to install.
 
 ```powershell
 cmake --preset msvc-x64
 cmake --build --preset release-x64
 ctest --preset test-x64
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\recovery\Recovery.Tests.ps1
 ```
 
-Recovery tests modify only unique disposable `HKCU\Software\MinimaDock.RecoveryTests` keys. The native guard test uses a hidden fixture and a harmless callback, never a live shell switch. See [compatibility](docs/compatibility.md), [performance](docs/performance.md) and [current progress](docs/progress.md) before any replacement experiment.
+A portable LLVM build (`tools\Build-Portable.ps1`), the installer (`tools\Install-MinimaDock.ps1`) and the release packager (`tools\Make-Release.ps1`) are described in [docs/development.md](docs/development.md). For how everything works under the hood (layout, recovery, compatibility and performance), see [docs/how-it-works.md](docs/how-it-works.md).
 
-MinimaDock's source, documentation and original launcher mark are licensed under [MIT](LICENSE), copyright 2026 AbdulBasithMohammed. Third-party components retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md). Regenerate the logo SVG and native header with `python tools/Generate-LauncherLogo.py`; no reference image or tracing is used.
+## 📄 License
 
-Before publishing this checkout, review [public repository preparation](docs/publishing.md). Personal recovery bundles, captures and deployments must stay local.
+[MIT](LICENSE) © 2026 AbdulBasithMohammed. Third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+<div align="center">
+<br>
+<sub>If MinimaDock makes your desktop a little calmer, a ⭐ helps others find it.</sub>
+</div>

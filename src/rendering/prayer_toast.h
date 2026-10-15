@@ -14,6 +14,7 @@ struct PrayerToastInfo {
     std::wstring done;       // "Iqama now" (shown when the countdown ends)
     ULONGLONG start_tick=0,end_tick=0;
     bool chime=true;         // A short chime as the card appears.
+    int sound=0;             // 0 Calendar, 1 soft bell (Customize > Prayer times > Chime).
 };
 // A small always-on-top card at the top centre of the screen in use (also over
 // games in windowed or borderless full screen). It never takes focus. After

@@ -32,3 +32,9 @@ Primary references checked during implementation:
 - [SendMessageTimeout](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendmessagetimeoutw) provides the guard's bounded UI-thread liveness probe.
 
 Managed policy assessment is deliberately unresolved. Capturing registry values cannot establish their source/precedence. No machine policy, security setting, Windows component or unrelated startup entry was changed.
+
+## Prayer websites and the bar (0.2.58)
+
+Read correctly: GalaxyStream widgets, Masjidal / Athan+ embedded widgets (e.g. ISBCC), Mawaqit pages (e.g. Paris), day tables and text listings (Masjid Manhattan, MCC East Bay). Declined: month-long timetables (East London Mosque), which fall back to calculated times. Pages that build their times entirely in JavaScript from private APIs cannot be read.
+
+The bar's work-area reservation applies to the primary monitor only.

@@ -19,6 +19,9 @@ namespace {
 constexpr UINT revert_message=WM_APP+20,keep_message=WM_APP+21,status_message=WM_APP+22;
 #ifndef MINIMA_TRIAL_TEST
 constexpr UINT snap_changed_message=WM_APP+23,snap_foreground_message=WM_APP+24;
+// The dock nudges the supervisor when its persistent bar starts or stops
+// reserving space, and answers bar_reserve_query with 1 while it should.
+constexpr UINT bar_reserve_changed=WM_APP+25,bar_reserve_query=WM_APP+120;
 HWND snap_control=nullptr;
 std::atomic_bool snap_queued=false;
 void CALLBACK snap_event(HWINEVENTHOOK,DWORD event,HWND window,LONG object,LONG child,DWORD,DWORD) {
@@ -166,6 +169,9 @@ void fallback_revert() {
 }
 struct Supervisor {
     Journal journal;Handle dock;HWND ui=nullptr,control=nullptr;bool accepted=false,active=false,journal_written=false;unsigned missed=0;ULONGLONG deadline=0;
+    // Installed (started at sign-in with --run): no time limit, and a crashed or
+    // hung dock is restarted (at most 3 times in 10 minutes) instead of reverting.
+    bool production=false;std::vector<ULONGLONG> restarts;
     std::array<HWINEVENTHOOK,3> snap_hooks{};
     DWORD snap_process=0;
 #ifndef MINIMA_TRIAL_TEST
@@ -215,6 +221,19 @@ struct Supervisor {
         if(count!=kept||kept!=journal.bars.size()||!journal_written){journal.save();journal_written=true;}
         for(const auto& b:journal.bars)if(valid(b)&&IsWindowVisible(reinterpret_cast<HWND>(static_cast<ULONG_PTR>(b.hwnd))))ShowWindowAsync(reinterpret_cast<HWND>(static_cast<ULONG_PTR>(b.hwnd)),SW_HIDE);
     }
+    // A persistent full-width bar keeps Windows' original reservation on the
+    // dock's monitor, so the work area only ever moves between the two
+    // journaled rectangles (and recovery restores `original` as before).
+    bool bar_reserved(const minima::WorkArea& area) const {
+#ifndef MINIMA_TRIAL_TEST
+        DWORD_PTR want=0;
+        if(!ui||!SendMessageTimeoutW(ui,bar_reserve_query,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,300,&want)||want!=1)return false;
+        MONITORINFO info{};info.cbSize=sizeof(info);
+        return GetMonitorInfoW(MonitorFromWindow(ui,MONITOR_DEFAULTTOPRIMARY),&info)&&minima::same_rect(info.rcMonitor,area.bounds);
+#else
+        (void)area;return false;
+#endif
+    }
     void expand_work_areas() {
 #ifndef MINIMA_TRIAL_TEST
         const auto current=minima::monitor_work_areas();
@@ -223,25 +242,26 @@ struct Supervisor {
             MONITORINFOEXW info{};
             if(!minima::current_work_area(a,info))throw std::runtime_error("Display configuration changed; taskbar trial reverted.");
             if(minima::same_rect(a.original,a.applied))continue;
-            if(minima::same_rect(info.rcWork,a.applied)) {
+            const bool reserve=bar_reserved(a);
+            const auto& target=reserve?a.original:a.applied;const auto& other=reserve?a.applied:a.original;
+            if(minima::same_rect(info.rcWork,target)) {
                 // Explorer's snap layout can still use its cached old work area.
-                minima::reflow_work_area_windows(a.original,a.applied);continue;
+                minima::reflow_work_area_windows(other,target);continue;
             }
-            if(!minima::same_rect(info.rcWork,a.original))throw std::runtime_error("Work area changed by another application; trial reverted without overwriting it.");
-            if(!minima::set_work_area(a.original,a.applied))throw std::runtime_error("Cannot release Windows taskbar work area.");
+            if(!minima::same_rect(info.rcWork,other))throw std::runtime_error("Work area changed by another application; trial reverted without overwriting it.");
+            if(!minima::set_work_area(other,target))throw std::runtime_error("Cannot update the taskbar work area.");
         }
 #endif
     }
-    void start(unsigned seconds) {
-        TOKEN_ELEVATION elevation{};DWORD bytes=0;HANDLE raw=nullptr;
-        if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw))throw std::runtime_error("Cannot check elevation.");
-        Handle token(raw);if(!GetTokenInformation(raw,TokenElevation,&elevation,sizeof(elevation),&bytes)||elevation.TokenIsElevated)throw std::runtime_error("Run the taskbar test as your normal unelevated desktop user.");
-        fallback_revert();
+    // Starts MinimaDock.exe --dock and waits until it reports ready.
+    void launch_dock(ULONGLONG wait) {
         std::wstring command=L"\""+(directory()/L"MinimaDock.exe").wstring()+L"\" --dock";
         STARTUPINFOW startup{};startup.cb=sizeof(startup);PROCESS_INFORMATION info{};
         if(!CreateProcessW((directory()/L"MinimaDock.exe").c_str(),command.data(),nullptr,nullptr,FALSE,0,nullptr,directory().c_str(),&startup,&info))throw std::runtime_error("Cannot start desktop dock.");
-        CloseHandle(info.hThread);dock.value=info.hProcess;journal.dock_pid=info.dwProcessId;journal.dock_time=created(dock.value);active=true;
-        const auto ready_deadline=GetTickCount64()+15000;
+        CloseHandle(info.hThread);
+        if(dock.value&&dock.value!=INVALID_HANDLE_VALUE)CloseHandle(dock.value);
+        dock.value=info.hProcess;journal.dock_pid=info.dwProcessId;journal.dock_time=created(dock.value);active=true;
+        const auto ready_deadline=GetTickCount64()+wait;
         do {
             ui=FindWindowW(L"MinimaDock.DesktopDock",nullptr);DWORD pid=0;if(ui)GetWindowThreadProcessId(ui,&pid);
             DWORD_PTR ready=0;
@@ -249,6 +269,29 @@ struct Supervisor {
             ui=nullptr;if(WaitForSingleObject(dock.value,100)==WAIT_OBJECT_0)throw std::runtime_error("Dock exited before readiness. Windows taskbar was not hidden.");
         }while(GetTickCount64()<ready_deadline);
         if(!ui)throw std::runtime_error("Dock did not become ready. Windows taskbar was not hidden.");
+    }
+    // Installed mode: replace a crashed or hung dock while the taskbar stays hidden.
+    bool restart_dock() {
+        const auto now=GetTickCount64();
+        std::erase_if(restarts,[&](ULONGLONG at){return now-at>600000;});
+        if(restarts.size()>=3)return false;
+        restarts.push_back(now);
+        if(WaitForSingleObject(dock.value,0)!=WAIT_OBJECT_0){TerminateProcess(dock.value,1);WaitForSingleObject(dock.value,2000);}
+        launch_dock(30000);journal.save();journal_written=true;missed=0;
+        expand_work_areas();
+        return true;
+    }
+    void start(unsigned seconds) {
+        TOKEN_ELEVATION elevation{};DWORD bytes=0;HANDLE raw=nullptr;
+        if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw))throw std::runtime_error("Cannot check elevation.");
+        Handle token(raw);if(!GetTokenInformation(raw,TokenElevation,&elevation,sizeof(elevation),&bytes)||elevation.TokenIsElevated)throw std::runtime_error("Run the taskbar test as your normal unelevated desktop user.");
+        fallback_revert();
+#ifndef MINIMA_TRIAL_TEST
+        // At sign-in Explorer may still be creating its taskbar.
+        if(production)for(unsigned i=0;i<180&&!FindWindowW(L"Shell_TrayWnd",nullptr);++i)Sleep(500);
+#endif
+        launch_dock(production?60000:15000);
+        accepted=accepted||production;
         EnumWindows(enumerate,reinterpret_cast<LPARAM>(this));
         if(journal.bars.empty())throw std::runtime_error("No matching taskbar found; deployment cancelled.");
 #ifndef MINIMA_TRIAL_TEST
@@ -283,12 +326,20 @@ struct Supervisor {
             if(message==keep_message||(message==WM_HOTKEY&&w==2)){self->accepted=true;return 1;}
 #ifndef MINIMA_TRIAL_TEST
             if(message==snap_changed_message){snap_queued=false;if(self->active)self->expand_work_areas();return 0;}
+            if(message==bar_reserve_changed){if(self->active)self->expand_work_areas();return 0;}
             if(message==snap_foreground_message){if(self->active)self->watch_location(reinterpret_cast<HWND>(w));return 0;}
 #endif
             if(message==revert_message||message==WM_CLOSE||(message==WM_HOTKEY&&w==1)){const auto restored=self->stop();DestroyWindow(window);return restored?1:0;}
             if(message==WM_TIMER) {
-                bool stop=WaitForSingleObject(self->dock.value,0)==WAIT_OBJECT_0||(!self->accepted&&GetTickCount64()>=self->deadline);
+                const bool exited=WaitForSingleObject(self->dock.value,0)==WAIT_OBJECT_0;
+                bool stop=exited||(!self->accepted&&GetTickCount64()>=self->deadline);
                 DWORD_PTR reply=0;if(!IsWindow(self->ui)||!SendMessageTimeoutW(self->ui,WM_NULL,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,700,&reply))++self->missed;else self->missed=0;
+                if(self->production&&(exited||self->missed>=2)) {
+                    // Exit code 0 is a deliberate close; anything else is a crash.
+                    DWORD code=1;if(exited)GetExitCodeProcess(self->dock.value,&code);
+                    if((!exited||code!=0)&&self->restart_dock()){self->hide();return 0;}
+                    if(exited&&code!=0)MessageBoxW(nullptr,L"MinimaDock stopped several times, so the Windows taskbar is back. It will start again the next time you sign in.",L"MinimaDock",MB_OK|MB_ICONWARNING|MB_SETFOREGROUND);
+                }
                 if(stop||self->missed>=2){self->stop();DestroyWindow(window);}else {self->hide();self->expand_work_areas();}return 0;
             }
             if(message==WM_QUERYENDSESSION){self->stop();return TRUE;}
@@ -303,7 +354,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     try {
         int count=0;auto args=CommandLineToArgvW(GetCommandLineW(),&count);if(!args)return 1;
-        const std::wstring action=count>=2?args[1]:L"--trial";unsigned seconds=600;
+        std::wstring action=count>=2?args[1]:L"--trial";unsigned seconds=600;
+        const bool production=action==L"--run";if(production)action=L"--trial";
         if(count==3&&action==L"--trial"){wchar_t* end=nullptr;const auto value=wcstoul(args[2],&end,10);if(!end||*end||value<10||value>3600){LocalFree(args);return 2;}seconds=static_cast<unsigned>(value);}
         LocalFree(args);
         if(action==L"--revert"||action==L"--keep"||action==L"--status") {
@@ -328,7 +380,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
         supervisor.control=CreateWindowExW(WS_EX_TOOLWINDOW,control_class,L"MinimaDock taskbar recovery guard",WS_POPUP,0,0,0,0,nullptr,nullptr,instance,&supervisor);
         if(!supervisor.control)throw std::runtime_error("Cannot create recovery control.");
         if(!RegisterHotKey(supervisor.control,1,MOD_CONTROL|MOD_ALT|MOD_NOREPEAT,VK_BACK)||!RegisterHotKey(supervisor.control,2,MOD_CONTROL|MOD_ALT|MOD_NOREPEAT,'K'))throw std::runtime_error("Recovery shortcut is already in use. Nothing was hidden.");
-        supervisor.start(seconds);
+        supervisor.production=production;supervisor.start(seconds);
         MSG message{};while(GetMessageW(&message,nullptr,0,0)>0){TranslateMessage(&message);DispatchMessageW(&message);}
         return 0;
     }catch(const std::exception& error){
@@ -336,7 +388,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int) {
         std::ofstream(directory()/L"TrialTestFailure.log")<<error.what()<<'\n';
 #endif
 #ifndef MINIMA_TRIAL_TEST
-        MessageBoxA(nullptr,error.what(),"MinimaDock taskbar test",MB_OK|MB_ICONERROR|MB_SETFOREGROUND);
+        MessageBoxA(nullptr,error.what(),"MinimaDock",MB_OK|MB_ICONERROR|MB_SETFOREGROUND);
 #endif
         return 1;
     }

@@ -55,7 +55,7 @@ private:
     bool moving_=false,reduced_=false;
 };
 enum class DockState { Collapsed, Expanding, Expanded, Collapsing, SuppressedFullscreen, Recovering };
-enum class Hold : unsigned { Pointer = 1, Keyboard = 2, Flyout = 4, ContextMenu = 8, Drag = 16 };
+enum class Hold : unsigned { Pointer = 1, Keyboard = 2, Flyout = 4, ContextMenu = 8, Drag = 16, Bar = 32 }; // Bar: the full-width style stays expanded.
 class DockMachine {
 public:
     using Time = std::int64_t; // Monotonic milliseconds, supplied by caller.

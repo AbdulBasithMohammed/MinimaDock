@@ -26,3 +26,5 @@ Design update: a 24 DIP Windows symbol stays centered in a 44 DIP button. Collap
 6. Clicking a focused running app activates it; it does not minimize it. Multiple windows use a text menu. Preview app grouping currently falls back to full executable path and must be upgraded for packaged apps before shipping.
 7. The preview displays honest Settings routes and pending media/tray states. No fake Wi-Fi/Bluetooth toggles, browser-session media control or hidden Explorer tray is provided.
 8. No runtime Win-key hook until chord preservation and Explorer-free keyboard behavior can be verified.
+
+- 0.2.58: Prayer sources are tried in a fixed order and each result must pass sanity checks; a wrong time is worse than a calculated one. Services that need private API keys (MasjidBox, Masjidal API) are not used, and month-long timetables are declined rather than guessed. The full-width bar reserves the work area through SPI_SETWORKAREA, covered by the trial supervisor's existing work-area journal, rather than registering an appbar.

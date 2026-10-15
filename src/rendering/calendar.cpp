@@ -2,6 +2,7 @@
 #include "rendering/theme.h"
 #include "rendering/glass.h"
 #include "rendering/glass_style.h"
+#include "rendering/dock_settings.h"
 #include "platform/com_ptr.h"
 #include "taskbar/calendar_model.h"
 #include "taskbar/state_machine.h"
@@ -52,7 +53,7 @@ struct CalendarPainter {
     static D2D1_COLOR_F fade(D2D1_COLOR_F c,float a){c.a*=a;return c;}
     void appearance() {
         HIGHCONTRASTW contrast{};contrast.cbSize=sizeof(contrast);SystemParametersInfoW(SPI_GETHIGHCONTRAST,sizeof(contrast),&contrast,0);high_contrast=(contrast.dwFlags&HCF_HIGHCONTRASTON)!=0;
-        transparency=theme::transparency_enabled();pal=theme::palette(theme::system_light());theme::apply_system_accent(pal);
+        const auto settings=load_dock_settings();transparency=dock_transparency(settings);pal=dock_palette(settings);
     }
     void initialize() {
         require(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,factory.put()));

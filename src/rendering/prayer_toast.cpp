@@ -319,7 +319,7 @@ struct PrayerToast::Impl {
         ShowWindow(hwnd,SW_SHOWNOACTIVATE);
         if(info.chime) {
             wchar_t folder[MAX_PATH]{};GetWindowsDirectoryW(folder,MAX_PATH);
-            const auto sound=std::wstring(folder)+L"\\Media\\Windows Notify Calendar.wav";
+            const auto sound=std::wstring(folder)+(info.sound==1?L"\\Media\\Windows Notify Messaging.wav":L"\\Media\\Windows Notify Calendar.wav");
             if(GetFileAttributesW(sound.c_str())==INVALID_FILE_ATTRIBUTES||!PlaySoundW(sound.c_str(),nullptr,SND_FILENAME|SND_ASYNC|SND_NODEFAULT))PlaySoundW(L"SystemAsterisk",nullptr,SND_ALIAS|SND_ASYNC);
         }
         arm();

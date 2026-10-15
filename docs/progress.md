@@ -425,3 +425,20 @@ The framed preview is exploratory design work. It does not pass milestones 2–7
 ## Next engineering step
 
 Build the activation coordinator behind an isolated-test-only gate: verify policy source/precedence, package and authenticate the guard/recovery engine, arm it before any mutation, and prove same-session and next-login recovery in a VM/disposable account. Then run the narrow compatibility spike for Explorer folders, Wallpaper Engine, tray hosting and maximized/fullscreen coexistence before expanding the runtime architecture. Permanent activation requires explicit opt-in after the measured gates pass.
+
+## 0.2.58: Customize window, full-width bar, prayer methods (2026-10-15)
+
+- Customize MinimaDock window: glass settings with Appearance, Dock, Prayer times, Launcher and About pages, live-applied and saved under HKCU.
+- Full-width bar style with optional auto-hide; without auto-hide it reserves its height in the work area.
+- Prayer times read via GalaxyStream, Athan+ widget, Mawaqit, page tables or page text, with a calculated (ISNA) fallback. Unit-tested with fixtures; verified against several real masjid pages.
+- Build 0A54F15E85B09F5A accepted by Smart App Control. Model, pin-state and prayer-method tests pass. Not yet exercised live: the Customize window, live palette changes and the bar's work area.
+
+- 0.2.59: Settings motion (sliding highlights, spring toggles, staggered page entrance) and the persistent bar keeping the Windows taskbar space, applied by the trial supervisor. Builds B19F87199F558EEF (dock) and 71160F4F013C4150 (supervisor) accepted.
+
+## 1.0.0: production install (2026-10-15)
+
+The user decided MinimaDock is now the production taskbar, not a test. `tools/Install-MinimaDock.ps1` (Install, Uninstall, Stop, Start, Status) installs per user to `%LOCALAPPDATA%\Programs\MinimaDock\versions\<time-hash>`, probes the exact copy with the launch check, retires a running trial or older install, starts the supervisor with `--run`, registers the HKCU Run value and an Apps & features entry. The supervisor's `--run` mode has no time limit, waits for Explorer's taskbar at sign-in, and restarts a crashed (non-zero exit) or hung dock up to three times in ten minutes before restoring the Windows taskbar. A deliberate close (exit 0), Ctrl+Alt+Backspace or "Return to the Windows taskbar" restores it until the next sign-in. Customize > About gains "Start with Windows". Explorer-free shell replacement remains out of scope.
+
+Builds: MinimaDock.exe 7512495ACFEB9CED and MinimaDockTrial.exe 26DF0FAABCE8055D, both accepted by Smart App Control. Installed and running; a forced kill of the dock was restarted automatically with the Windows taskbar kept hidden.
+
+- Release packaging: download zip with one-click Install/Uninstall, empty default masjid website, persistent bar hides for browser full-screen video, new README. Dock build B8F2DDAB86CFD8BE accepted.

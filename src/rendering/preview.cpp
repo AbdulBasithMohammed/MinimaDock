@@ -7,6 +7,8 @@
 #include "rendering/previews.h"
 #include "rendering/jump_list.h"
 #include "rendering/prayer_toast.h"
+#include "rendering/customize.h"
+#include "rendering/dock_settings.h"
 #include "windows/jump_lists.h"
 #include "windows/volume.h"
 #include "rendering/icon_paths.h"
@@ -169,7 +171,10 @@ public:
         return false;
     }
     // Hover motion chosen in the Dock Hover Springs preview (2026-10-14).
-    static constexpr float hover_stiffness=320,hover_damping=17,hover_grow=1.22f,hover_lift=6,hover_spread=3;
+    static constexpr float hover_stiffness=320,hover_damping=17,hover_lift=6,hover_spread=3;
+    // From Customize: hover scale, app icon size, the media wing, date line and 24-hour clock.
+    float hover_grow=1.22f,icon_px=24;bool show_media=true,show_date=true,clock24=false;
+    bool bar=false,bar_left=false; // Full-width bar style; apps centred or left-aligned.
     Spring tip_show,tip_x;     // Name tooltip: springs in and glides between icons.
     // Wing controls (tray, quick settings, clock, three media buttons) use the same
     // spring with a smaller lift: they are glyphs and text, not 24 DIP icons.
@@ -216,7 +221,7 @@ public:
     // ---- Launcher (the MinimaDock button) ----
     // Local-only search: apps (Windows' All apps list), dock actions, Settings
     // pages and answers (sums, units, dates). Nothing is sent online.
-    enum class LaunchAction {WifiOn,WifiOff,BluetoothOn,BluetoothOff,MicMute,MicUnmute,Capture,Timer,Dark,Light,Lock,Sleep,Restart,Shutdown,SignOut,StartMenu,WinKeyStart,WinKeyDock};
+    enum class LaunchAction {WifiOn,WifiOff,BluetoothOn,BluetoothOff,MicMute,MicUnmute,Capture,Timer,Dark,Light,Lock,Sleep,Restart,Shutdown,SignOut,StartMenu,WinKeyStart,WinKeyDock,Customize};
     bool windows_key_on=false; // The Windows key opens this launcher (live dock only).
     struct LaunchResult {
         enum class Kind {Answer,App,Action,Setting,File,Window,Command,Emoji,Link};
@@ -296,6 +301,7 @@ public:
             {LaunchAction::Lock,L"Lock",L"lock"},{LaunchAction::Sleep,L"Sleep",L"sleep suspend"},{LaunchAction::Restart,L"Restart",L"restart reboot"},
             {LaunchAction::Shutdown,L"Shut down",L"shut down shutdown power off"},{LaunchAction::SignOut,L"Sign out",L"sign out log off logout"},
             {LaunchAction::StartMenu,L"Open Start menu",L"start menu windows"},
+            {LaunchAction::Customize,L"Customize MinimaDock",L"customize settings theme color appearance dock taskbar bar prayer masjid"},
             {LaunchAction::WinKeyStart,L"Windows key opens Start",L"windows key win start menu restore default"},
             {LaunchAction::WinKeyDock,L"Windows key opens MinimaDock",L"windows key win launcher"},
         };
@@ -1325,7 +1331,7 @@ public:
         const std::wstring volume_label=!volume_available?L"No output device":volume_muted?L"Muted":L"Volume "+std::to_wstring(static_cast<int>(std::lround(volume_level*100)))+L"%";
         text(volume_label,D2D1::RectF(r.left+60,r.top+277,r.right-20,r.top+297),0,pal.ink_secondary);
         line(r.left+1,r.bottom-40,r.right-1,r.bottom-40,pal.separator);
-        text(desktop?L"Revert taskbar · Ctrl+Alt+Backspace":(recovery_entry.empty()?L"Recovery bundle not prepared":L"Restore Windows desktop"),D2D1::RectF(r.left+20,r.bottom-33,r.right-55,r.bottom-8),0,pal.ink);
+        text(desktop?L"Windows taskbar · Ctrl+Alt+Backspace":(recovery_entry.empty()?L"Recovery bundle not prepared":L"Restore Windows desktop"),D2D1::RectF(r.left+20,r.bottom-33,r.right-55,r.bottom-8),0,pal.ink);
         {const auto g=settings_gear();const float cx=(g.left+g.right)/2,cy=(g.top+g.bottom)/2; // The gear turns a quarter on hover.
          icon_part(Icon::Gear,0,cx,cy,18,pal.ink,turn(gear_turn.value(),12,12));icon_part(Icon::Gear,1,cx,cy,18,pal.ink);}
     }
@@ -1432,7 +1438,7 @@ public:
     }
     void update_clock() {
         wchar_t time[64]{},date[64]{};
-        GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT,TIME_NOSECONDS,nullptr,nullptr,time,64);
+        GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT,TIME_NOSECONDS|(clock24?TIME_FORCE24HOURFORMAT:0),nullptr,nullptr,time,64);
         GetDateFormatEx(LOCALE_NAME_USER_DEFAULT,DATE_SHORTDATE,nullptr,nullptr,date,64,nullptr);
         clock_time=time; clock_date=date;
         // Compact date beside the next prayer, e.g. "14 Oct 26".
@@ -1473,7 +1479,7 @@ public:
         if(!target) return;
         // 32 DIP copies keep magnified icons (x1.22 plus overshoot) sharp; rest state stays pixel-exact at 24.
         app_icons_large.clear();
-        for(const auto& g:groups) {app_icons.push_back(bitmap_icon(g.icon));app_icons_large.push_back(bitmap_icon(g.icon,32));}
+        for(const auto& g:groups) {app_icons.push_back(bitmap_icon(g.icon,icon_px));app_icons_large.push_back(bitmap_icon(g.icon,icon_px*4/3));}
         for(const auto& i:tray_items)tray_icons.push_back(bitmap_icon(i.icon,20));
         for(size_t i=0;i<std::min<size_t>(8,inventory.desktop.size());++i)desktop_icons.push_back(bitmap_icon(inventory.desktop[i].icon,34));
         prune_icon_cache();
@@ -1594,15 +1600,25 @@ public:
         if(overflow(i)) return std::any_of(groups.begin()+static_cast<std::ptrdiff_t>(i),groups.end(),[](const Group& g){return !g.windows.empty();});
         return !groups[i].windows.empty();
     }
-    DockLayout layout() const { DockLayout l{width/2,height-34,width-40,shown_groups()};if(slots_placed)l.slots=slots_visual.value();return l; }
+    DockLayout layout() const {
+        DockLayout l{width/2,height-34,width-40,shown_groups()};if(slots_placed)l.slots=slots_visual.value();l.media=show_media;
+        if(bar) { // 48 DIP along the bottom edge; apps centred or after the media wing.
+            l.bar=true;l.bar_width=width;l.center_y=height-24;l.available_width=width;
+            if(bar_left)l.center=(show_media?DockLayout::utility_width+40:12)+l.collapsed_width()/2;
+        }
+        return l;
+    }
     float app_x(size_t index) const { return layout().app_x(index); }
     D2D1_RECT_F app_rect(size_t i) const { const auto x=app_x(i),y=layout().center_y;return D2D1::RectF(x-18,y-19,x+18,y+19); }
     D2D1_RECT_F launcher_rect() const { const auto l=layout();const float x=l.left()+DockLayout::edge;return D2D1::RectF(x,l.center_y-22,x+DockLayout::button,l.center_y+22); }
     D2D1_RECT_F dock() const {
-        const auto l=layout();const auto p=machine.progress(),w=l.width(p),h=l.height(p);
-        return D2D1::RectF(l.center-w/2,l.center_y-h/2,l.center+w/2,l.center_y+h/2);
+        const auto l=layout();const auto p=machine.progress(),h=l.height(p);
+        if(l.bar)return D2D1::RectF(0,height-48,width,height);
+        const float left=l.center-l.collapsed_width()/2+(l.expanded_left()-(l.center-l.collapsed_width()/2))*p;
+        const float right=l.center+l.collapsed_width()/2+(l.expanded_right()-(l.center+l.collapsed_width()/2))*p;
+        return D2D1::RectF(left,l.center_y-h/2,right,l.center_y+h/2);
     }
-    D2D1_RECT_F media_rect() const { const auto l=layout();return D2D1::RectF(l.center-l.expanded_width()/2+12,l.center_y-18,l.center-l.expanded_width()/2+DockLayout::utility_width+4,l.center_y+18); }
+    D2D1_RECT_F media_rect() const { const auto l=layout();return D2D1::RectF(l.expanded_left()+12,l.center_y-18,l.expanded_left()+DockLayout::utility_width+4,l.center_y+18); }
     D2D1_RECT_F media_button(size_t index) const {const auto r=media_rect();const auto x=(r.left+r.right)/2+(static_cast<float>(index)-1)*40;return D2D1::RectF(x-16,r.top+19,x+16,r.bottom+1);}
     void measure_media_title() {
         const auto label=media.available?media.title:(media.unavailable?L"Media unavailable":L"No media");
@@ -1614,12 +1630,12 @@ public:
         const auto r=media_rect();media_marquee.configure(media.available?metrics.widthIncludingTrailingWhitespace-(r.right-r.left):0);
     }
     bool media_enabled(size_t index) const {return media.available&&(index==0?media.previous:index==1?media.toggle:media.next);}
-    D2D1_RECT_F system_rect() const { const auto l=layout();return D2D1::RectF(l.center+l.expanded_width()/2-DockLayout::utility_width-10-DockLayout::desktop_width,l.center_y-20,l.center+l.expanded_width()/2-10-DockLayout::desktop_width,l.center_y+20); }
+    D2D1_RECT_F system_rect() const { const auto l=layout();return D2D1::RectF(l.expanded_right()-DockLayout::utility_width-10-DockLayout::desktop_width,l.center_y-20,l.expanded_right()-10-DockLayout::desktop_width,l.center_y+20); }
     D2D1_RECT_F tray_rect() const {const auto s=system_rect();const auto cy=layout().center_y;return D2D1::RectF(s.left,cy-19,s.left+24,cy+19);}
     D2D1_RECT_F quick_settings_rect() const { const auto s=system_rect();const auto cy=layout().center_y;return D2D1::RectF(s.left+24,cy-19,s.left+77,cy+19); }
     D2D1_RECT_F clock_rect() const { const auto s=system_rect();const auto cy=layout().center_y;return D2D1::RectF(s.left+81,cy-19,s.right,cy+19); }
     D2D1_RECT_F desktop_button_rect() const {
-        const auto l=layout();const auto right=l.center+l.expanded_width()/2,cy=l.center_y;
+        const auto l=layout();const auto right=l.expanded_right(),cy=l.center_y;
         // Keep the hidden sliver in its utility wing while the capsule reveals
         // it, rather than sweeping a desktop target across the last app.
         return D2D1::RectF(right-4-DockLayout::desktop_width,cy-13,right-4,cy+13);
@@ -1652,7 +1668,7 @@ public:
             if(inside(tray_rect(),x,y))control_pressed=count+1;
             else if(inside(quick_settings_rect(),x,y))control_pressed=count+2;
             else if(inside(clock_rect(),x,y))control_pressed=count+3;
-            else for(size_t i=0;i<3;++i)if(media_enabled(i)&&inside(media_button(i),x,y))control_pressed=count+5+static_cast<int>(i);
+            else if(show_media)for(size_t i=0;i<3;++i)if(media_enabled(i)&&inside(media_button(i),x,y))control_pressed=count+5+static_cast<int>(i);
         }
     }
     size_t active_pulses() const {
@@ -1686,7 +1702,7 @@ public:
                 const int d=std::abs(static_cast<int>(k)-slot);
                 // Only the two direct neighbours make room; icons further away stay
                 // still (sub-pixel nudges there read as a jittery ripple).
-                if(d==0){grow=hover_grow;lift=hover_lift;}
+                if(d==0){grow=hover_grow;lift=hover_lift*std::min(1.0f,(hover_grow-1)/.22f);}
                 else if(d==1)aside=static_cast<int>(k)<slot?-hover_spread:hover_spread;
             }
             magnify[k].target(grow,now,reduced);rise[k].target(lift,now,reduced);spread[k].target(aside,now,reduced);
@@ -1930,7 +1946,7 @@ public:
 
         if (machine.visible()) {
             const auto r=dock(); const auto p=machine.progress();
-            glass(r,(r.bottom-r.top)/2);
+            glass(r,bar?0.0f:(r.bottom-r.top)/2);
             const auto cy=layout().center_y;
             const bool launcher_over=hover(launcher_rect());
             ensure_motion();
@@ -1972,7 +1988,7 @@ public:
                 bubble(x,cy,groups[i].pulse,opacity);
                 const float grow=magnify[i+1].value();
                 const float lift=rise[i+1].value();
-                const float half=12*grow*pop*click_scale(groups[i].pulse,groups[i].pressed);
+                const float half=icon_px/2*grow*pop*click_scale(groups[i].pulse,groups[i].pressed);
                 if(lift>.5f)overlay_rects.push_back(D2D1::RectF(x-half,cy-half-lift,x+half,cy+half-lift)); // Visible above the pill.
                 float dx=96,dy=96;target->GetDpi(&dx,&dy);
                 const auto snap_x=[&](float value){return std::round(value*dx/96)*96/dx;};
@@ -2021,6 +2037,7 @@ public:
                     text(system_symbols[i],D2D1::RectF(x-11,cy-17-lift,x+11,cy+17-lift),5,fade(pal.ink,p),true);
                     target->SetTransform(transform);
                 }
+                if(show_media) {
                 line(music.right+6,cy-12,music.right+6,cy+12,fade(pal.separator,p));
                 measure_media_title();
                 const auto title_area=D2D1::RectF(music.left,music.top,music.right,music.top+17);
@@ -2037,6 +2054,7 @@ public:
                     target->SetTransform(transform);
                     if(focus==static_cast<int>(shown_groups())+5+static_cast<int>(i))outline(media_button(i),pal.accent,8,1.5f);
                 }
+                }
                 line(system.left-6,cy-12,system.left-6,cy+12,fade(pal.separator,p));
                 const auto clock=clock_rect();const bool clock_over=hover(clock);
                 if(clock_over)rect(clock,fade(pal.hover,p),16);
@@ -2046,8 +2064,8 @@ public:
                 const auto clock_scale=click_scale(clock_pulse,control_pressed==static_cast<int>(shown_groups())+3);
                 target->SetTransform(D2D1::Matrix3x2F::Scale(clock_scale,clock_scale,D2D1::Point2F((clock.left+clock.right)/2,cy))*clock_transform);
                 // With prayer times: "11:00 PM · 14 Oct 26" over the next prayer; otherwise time over date.
-                text(prayer_line.empty()?clock_time:clock_time+L" \x00B7 "+clock_short,D2D1::RectF(clock.left-4,cy-17-clock_lift,clock.right+4,cy+1-clock_lift),6,fade(pal.ink,p),true);
-                text(prayer_line.empty()?clock_short:prayer_line,D2D1::RectF(clock.left-4,cy+1-clock_lift,clock.right+4,cy+18-clock_lift),7,fade(pal.ink,p),true);
+                text(prayer_line.empty()||!show_date?clock_time:clock_time+L" \x00B7 "+clock_short,D2D1::RectF(clock.left-4,cy-17-clock_lift,clock.right+4,cy+1-clock_lift),6,fade(pal.ink,p),true);
+                text(prayer_line.empty()?(show_date?clock_short:std::wstring()):prayer_line,D2D1::RectF(clock.left-4,cy+1-clock_lift,clock.right+4,cy+18-clock_lift),7,fade(pal.ink,p),true);
                 target->SetTransform(clock_transform);
                 if(focus==static_cast<int>(shown_groups())+1)outline(D2D1::RectF(system.left,system.top,system.left+23,system.bottom),pal.accent,10,1.5f);
                 if(focus==static_cast<int>(shown_groups())+2)outline(quick_settings,pal.accent,14,1.5f);
@@ -2257,6 +2275,56 @@ public:
     // ---- Launcher ----
     LauncherIndex launcher_index;
     bool caret_blinking=false;
+    // ---- Customize ----
+    DockSettings dock_settings=load_dock_settings();
+    CustomizeWindow customize;
+    // Full-width bar without auto-hide: maximized windows stop above it. The
+    // trial supervisor owns the work area (it journals and restores it), so it
+    // asks (WM_APP+120) and keeps Windows' own taskbar reservation meanwhile.
+    bool bar_reserved=false;
+    void reserve_bar(bool on) {
+        if(!live_dock||on==bar_reserved)return;
+        bar_reserved=on;
+        if(const auto supervisor=FindWindowW(L"MinimaDock.Trial.Control",nullptr))PostMessageW(supervisor,WM_APP+25,0,0);
+    }
+    void apply_dock_settings(const DockSettings& s) {
+        const bool layout_changed=s.media!=dock_settings.media||s.icon!=dock_settings.icon||s.style!=dock_settings.style;
+        dock_settings=s;save_dock_settings(s);
+        update_preferences();calendar.preferences(scene.reduced);
+        scene.painter.palette=scene.pal;
+        if(layout_changed){scene.ensure_motion();desktop_position();}
+        reserve_bar(s.style==DockSettings::Style::Bar&&!s.bar_autohide);
+        fullscreen();refresh_clock();schedule();
+    }
+    void open_customize() {
+        dismiss_panel();
+        CustomizeHooks hooks;
+        hooks.version=L"1.0.0";
+        hooks.dock_changed=[this](const DockSettings& s){apply_dock_settings(s);};
+        hooks.prayer_changed=[this](const PrayerSettings& s,bool website){
+            const bool restart=website||s.method!=prayer_settings.method||s.calculate!=prayer_settings.calculate||s.latitude!=prayer_settings.latitude||s.longitude!=prayer_settings.longitude;
+            prayer_settings=s;save_prayer_settings(s);
+            if(restart)prayers.start(hwnd,prayer_settings);
+            prayer_tick();schedule();
+        };
+        hooks.prayer_status=[this]{return prayers.snapshot();};
+        hooks.check_prayers=[this]{prayers.refresh(true);};
+        if(live_dock) {
+            hooks.windows_key=[this]{return windows_key.enabled();};
+            hooks.set_windows_key=[this](bool on){save_windows_key_setting(on);windows_key.enable(on);scene.windows_key_on=on;};
+            hooks.return_to_windows=[this]{customize.close();return_to_windows();};
+            hooks.start_with_windows=[]{return starts_with_windows();};
+            hooks.set_start_with_windows=[](bool on){set_starts_with_windows(on);};
+        }
+        hooks.clear_history=[this]{RegDeleteTreeW(HKEY_CURRENT_USER,L"Software\\MinimaDock\\Launcher\\Usage");scene.launch_usage.clear();};
+        hooks.reset_everything=[this]{
+            for(const auto key:{L"Software\\MinimaDock\\Settings",L"Software\\MinimaDock\\Pins",L"Software\\MinimaDock\\Launcher\\Usage",L"Software\\MinimaDock\\Prayer"})RegDeleteTreeW(HKEY_CURRENT_USER,key);
+            prayer_settings=load_prayer_settings();prayers.start(hwnd,prayer_settings);
+            apply_dock_settings(DockSettings{});scan(true);
+        };
+        customize.open(hwnd,dock_settings,prayer_settings,std::move(hooks),scene.reduced);
+    }
+
     // Explorer's "Pin to taskbar" (desktop icons, File Explorer, Start) also pins to the dock.
     PinWatch pin_watch;
     std::vector<std::wstring> windows_pin_ids;
@@ -2419,6 +2487,7 @@ public:
         case Action::Shutdown:start_power(3);break;
         case Action::SignOut:start_power(4);break;
         case Action::StartMenu:set_panel(Panel::None);open_start_menu();break;
+        case Action::Customize:open_customize();break;
         case Action::WinKeyStart:case Action::WinKeyDock: {
             const bool on=static_cast<Action>(item.index)==Action::WinKeyDock;
             save_windows_key_setting(on);windows_key.enable(on);scene.windows_key_on=on&&live_dock;
@@ -2505,6 +2574,7 @@ public:
         if(snap.have&&prayer_settings.reminders)
             for(const auto& event:prayer_events(snap.day,friday,prayer_settings.iqama_lead)) {
                 if(now<event.minute||now>event.minute+2||std::find(prayer_fired.begin(),prayer_fired.end(),event.key())!=prayer_fired.end())continue;
+                if(event.kind==PrayerEvent::Kind::Sunrise&&!prayer_settings.sunrise)continue;
                 prayer_fired.push_back(event.key());notify_prayer(event,snap.day);
             }
         calendar.prayers(prayer_view(snap,now,friday,today));
@@ -2530,7 +2600,8 @@ public:
             if(t.iqama>=0){info.subtitle=L"Iqama at "+prayer_clock(t.iqama,true);info.end_tick=at(t.iqama);info.start_tick=event.kind==Kind::Adhan?tick:at(t.adhan);}
             else info.subtitle=L"Adhan at "+prayer_clock(t.adhan,true);
         }
-        info.chime=scene.timer_state!=Scene::TimerState::Ringing; // Never cut off the timer's alarm.
+        info.chime=prayer_settings.chime!=2&&scene.timer_state!=Scene::TimerState::Ringing; // Never cut off the timer's alarm.
+        info.sound=prayer_settings.chime;
         prayer_toast.show(info,scene.pal,scene.reduced);
     }
     // ---- Quick settings ----
@@ -2899,7 +2970,8 @@ public:
     }
     void sync_visibility() {
         if(!live_dock)return;
-        visibility.update(auto_hidden,!scene.machine.visible(),scene.machine.holds()!=0,now());
+        // The bar's own hold keeps it expanded; it is not a reason to stay revealed.
+        visibility.update(auto_hidden,!scene.machine.visible(),(scene.machine.holds()&~static_cast<unsigned>(Hold::Bar))!=0,now());
         auto style=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
         const auto wanted=visibility.wanted()?style&~WS_EX_TRANSPARENT:style|WS_EX_TRANSPARENT;
         if(style!=wanted)SetWindowLongPtrW(hwnd,GWL_EXSTYLE,wanted);
@@ -2942,7 +3014,7 @@ public:
         // The window region still limits input to the dock and the open flyout.
         const bool roomy=glass_mode||shown==Panel::Launcher;
         const float canvas=roomy?std::max(desired,Scene::launch_width+80):desired;
-        const auto w=std::min(info.rcMonitor.right-info.rcMonitor.left,static_cast<LONG>(std::ceil(canvas*scale)));
+        const auto w=scene.bar?info.rcMonitor.right-info.rcMonitor.left:std::min(info.rcMonitor.right-info.rcMonitor.left,static_cast<LONG>(std::ceil(canvas*scale)));
         const float tall=roomy?Scene::launch_height+100:440;
         const auto h=std::min(info.rcMonitor.bottom-info.rcMonitor.top,static_cast<LONG>((!glass_mode&&(shown==Panel::None||shown==Panel::Calendar)?88:tall)*scale));
         // Keep the currently displayed bitmap in place until its replacement is
@@ -2983,14 +3055,26 @@ public:
         const auto monitor=MonitorFromWindow(hwnd,MONITOR_DEFAULTTOPRIMARY);
         wchar_t klass[128]{};GetClassNameW(foreground,klass,128);
         const bool desktop=wcscmp(klass,L"Progman")==0||wcscmp(klass,L"WorkerW")==0;
-        const bool covers=foreground&&owner!=GetCurrentProcessId()&&!desktop&&!IsIconic(foreground)&&!IsZoomed(foreground)&&
+        // Browsers keep a maximized window maximized for full-screen video, so a
+        // maximized window counts too when its visible frame fills the monitor while
+        // the work area is smaller (the persistent bar or another reservation):
+        // ordinary maximized windows stop at the work area.
+        const auto fills=[&](const RECT& r){return r.left<=info.rcMonitor.left&&r.top<=info.rcMonitor.top&&r.right>=info.rcMonitor.right&&r.bottom>=info.rcMonitor.bottom;};
+        const bool covers=foreground&&owner!=GetCurrentProcessId()&&!desktop&&!IsIconic(foreground)&&
             MonitorFromWindow(foreground,MONITOR_DEFAULTTOPRIMARY)==monitor&&GetWindowRect(foreground,&bounds)&&GetMonitorInfoW(monitor,&info)&&
-            bounds.left<=info.rcMonitor.left&&bounds.top<=info.rcMonitor.top&&bounds.right>=info.rcMonitor.right&&bounds.bottom>=info.rcMonitor.bottom;
+            (!IsZoomed(foreground)?fills(bounds):[&]{
+                RECT frame{};
+                return !EqualRect(&info.rcWork,&info.rcMonitor)&&SUCCEEDED(DwmGetWindowAttribute(foreground,DWMWA_EXTENDED_FRAME_BOUNDS,&frame,sizeof(frame)))&&fills(frame);
+            }());
         if(covers) {calendar.close(false);set_panel(Panel::None,false);close_previews(false);scene.stop_feedback();}
-        auto_hidden=foreground&&!desktop&&IsWindowVisible(foreground)&&!IsIconic(foreground)&&
+        const bool over_window=foreground&&!desktop&&IsWindowVisible(foreground)&&!IsIconic(foreground)&&
             (IsZoomed(foreground)||window_arranged(foreground))&&MonitorFromWindow(foreground,MONITOR_DEFAULTTOPRIMARY)==monitor;
+        // Customize > Dock > Hide the dock: over maximized windows (default), always, never.
+        if(dock_settings.style==DockSettings::Style::Bar)auto_hidden=dock_settings.bar_autohide; // Like the Windows taskbar's auto-hide.
+        else auto_hidden=dock_settings.hide==DockSettings::Hide::Always?true:dock_settings.hide==DockSettings::Hide::Never?false:over_window;
         scene.machine.suppress(covers,now());
-        scene.readability_boost=auto_hidden;
+        if(!covers)scene.machine.hold(Hold::Bar,scene.bar,now()); // Suppression clears holds.
+        scene.readability_boost=over_window;
         sync_visibility();
     }
     // Right-click on empty dock space: the dock's own settings and recovery.
@@ -3000,10 +3084,11 @@ public:
         add_entry(sections[0],1,L"Task Manager",L'\xE9D9');
         add_entry(sections[0],2,L"Show desktop",L'\xE7C4');
         add_entry(sections[0],3,L"Quick settings",L'\xE713');
+        add_entry(sections[1],8,L"Customize MinimaDock\x2026",L'\xE771');
         if(live_dock)add_entry(sections[1],4,windows_key.enabled()?L"Windows key opens Start":L"Windows key opens MinimaDock",L'\xE765');
         add_entry(sections[1],5,L"Windows taskbar settings",L'\xE8A9');
         if(live_dock) {
-            add_entry(sections[2],6,L"Keep MinimaDock for this session",L'\xE718');
+            if(supervisor_status()==1)add_entry(sections[2],6,L"Keep MinimaDock for this session",L'\xE718'); // Trial runs only.
             add_entry(sections[2],7,L"Return to the Windows taskbar",L'\xE7A7');
         }
         const auto d=scene.dock();POINT cursor{};GetCursorPos(&cursor);POINT client=cursor;ScreenToClient(hwnd,&client);
@@ -3014,12 +3099,36 @@ public:
             else if(id==3)set_panel(Panel::Settings);
             else if(id==4){const bool on=!windows_key.enabled();save_windows_key_setting(on);windows_key.enable(on);scene.windows_key_on=on;}
             else if(id==5)launch(L"ms-settings:taskbar");
+            else if(id==8)open_customize();
             else if(id==6) {
                 wchar_t module[32768]{};GetModuleFileNameW(nullptr,module,32768);
                 const auto path=(std::filesystem::path(module).parent_path()/L"MinimaDockTrial.exe").wstring();
                 ShellExecuteW(hwnd,L"open",path.c_str(),L"--keep",nullptr,SW_HIDE);
-            } else if(id==7)PostMessageW(hwnd,WM_CLOSE,0,0);
+            } else if(id==7)return_to_windows();
         });
+    }
+    // The supervisor (MinimaDockTrial.exe) hides the Windows taskbar and restarts
+    // a crashed dock. 0 none, 1 timed trial, 2 kept or installed.
+    static HWND supervisor(){return FindWindowW(L"MinimaDock.Trial.Control",nullptr);}
+    static int supervisor_status() {
+        DWORD_PTR reply=0;const auto control=supervisor();
+        return control&&SendMessageTimeoutW(control,WM_APP+22,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,300,&reply)?static_cast<int>(reply):0;
+    }
+    // Brings the Windows taskbar back for this session (the supervisor restores
+    // it and closes the dock; it would otherwise restart a closed dock).
+    void return_to_windows() {
+        if(const auto control=supervisor())PostMessageW(control,WM_APP+20,0,0);else PostMessageW(hwnd,WM_CLOSE,0,0);
+    }
+    // Sign-in start: HKCU Run "MinimaDock" -> this folder's supervisor with --run.
+    static constexpr const wchar_t* run_key=L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    static bool starts_with_windows() {
+        DWORD size=0;return RegGetValueW(HKEY_CURRENT_USER,run_key,L"MinimaDock",RRF_RT_REG_SZ,nullptr,nullptr,&size)==ERROR_SUCCESS;
+    }
+    static void set_starts_with_windows(bool on) {
+        if(!on){RegDeleteKeyValueW(HKEY_CURRENT_USER,run_key,L"MinimaDock");return;}
+        wchar_t module[32768]{};if(!GetModuleFileNameW(nullptr,module,32768))return;
+        const auto command=L"\""+(std::filesystem::path(module).parent_path()/L"MinimaDockTrial.exe").wstring()+L"\" --run";
+        RegSetKeyValueW(HKEY_CURRENT_USER,run_key,L"MinimaDock",REG_SZ,command.c_str(),static_cast<DWORD>((command.size()+1)*sizeof(wchar_t)));
     }
     // Menus in the same glass style as the app jump lists (and the system theme).
     JumpList control_list{control_list_message};
@@ -3274,12 +3383,14 @@ public:
             add_entry(sections[0],4,L"File Explorer",L'\xEC50');add_entry(sections[0],5,L"Terminal",L'\xE756');
             if(live_dock)add_entry(sections[1],6,windows_key.enabled()?L"Windows key opens Start":L"Windows key opens MinimaDock",L'\xE765');
             add_entry(sections[1],7,L"Open Start menu",L'\xE8FC');
+            add_entry(sections[1],8,L"Customize MinimaDock\x2026",L'\xE771');
             glass_menu(std::move(sections),scene.launcher_rect(),keyboard,[this](UINT id) {
                 const wchar_t* paths[]={L"ms-settings:",L"taskmgr.exe",L"explorer.exe",L"wt.exe"};
                 if(id==1)windows_key_pressed_or_open();
                 else if(id>=2&&id<=5)launch(paths[id-2]);
                 else if(id==6){const bool on=!windows_key.enabled();save_windows_key_setting(on);windows_key.enable(on);scene.windows_key_on=on;}
                 else if(id==7)open_start_menu();
+                else if(id==8)open_customize();
             });
             return;
         }
@@ -3309,7 +3420,7 @@ public:
         scene.measure_media_title();
         // A long title scrolls only while the pointer is over the media controls:
         // a resting dock draws nothing (it was redrawing ~22 times a second).
-        const bool over_media=inside(scene.media_rect(),scene.pointer_x,scene.pointer_y);
+        const bool over_media=scene.show_media&&inside(scene.media_rect(),scene.pointer_x,scene.pointer_y);
         scene.media_marquee.visible(scene.machine.state()==DockState::Expanded&&visibility.progress()>.99f&&scene.panel==Panel::None&&over_media,scene.reduced,now());
         if(scene.media_marquee.active()&&!media_timer)media_timer=SetTimer(hwnd,media_title_timer,33,nullptr)!=0;
         else if(!scene.media_marquee.active()&&media_timer){KillTimer(hwnd,media_title_timer);media_timer=false;}
@@ -3325,14 +3436,22 @@ public:
     void update_preferences() {
         BOOL animations=TRUE; SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animations,0);
         HIGHCONTRASTW contrast{}; contrast.cbSize=sizeof(contrast); SystemParametersInfoW(SPI_GETHIGHCONTRAST,sizeof(contrast),&contrast,0);
-        scene.reduced=!animations; scene.high_contrast=(contrast.dwFlags&HCF_HIGHCONTRASTON)!=0;
+        const auto& s=dock_settings;
+        scene.reduced=s.motion==DockSettings::Motion::Reduced||(s.motion==DockSettings::Motion::Windows&&!animations);
+        scene.high_contrast=(contrast.dwFlags&HCF_HIGHCONTRASTON)!=0;
+        const float icon=static_cast<float>(s.icon);const bool icons_changed=icon!=scene.icon_px;
+        scene.icon_px=icon;scene.hover_grow=static_cast<float>(s.magnify)/100;scene.show_media=s.media;scene.show_date=s.date;
+        scene.bar=s.style==DockSettings::Style::Bar;scene.bar_left=s.bar_left;
+        scene.machine.hold(Hold::Bar,scene.bar,now());
+        if(scene.clock24!=s.clock24){scene.clock24=s.clock24;scene.update_clock();}
+        if(icons_changed&&scene.target)scene.rebuild_icons();
         scene.machine.reduced_motion(scene.reduced);
         if(scene.reduced){const bool exiting=scene.exiting_panel!=Panel::None;scene.stop_feedback();if(exiting&&scene.desktop)desktop_position();}
         visibility.reduced_motion(scene.reduced);
         calendar.preferences(scene.reduced);
         scene.machine.hold(Hold::Flyout,flyout_open(),now());
-        scene.transparency=theme::transparency_enabled();
-        scene.pal=theme::palette(theme::system_light());theme::apply_system_accent(scene.pal);
+        scene.transparency=dock_transparency(dock_settings);
+        scene.pal=dock_palette(dock_settings);
     }
     void scan(bool full) {
         // A request made while a scan runs is replayed after it, keeping the
@@ -3611,7 +3730,7 @@ public:
                     if(volume.available()&&inside(scene.volume_mute_rect(),x,y)){volume.set_muted(!volume.muted());read_volume();schedule();}
                     if(inside(D2D1::RectF(r.right-45,r.bottom-36,r.right-16,r.bottom-5),x,y))launch(L"ms-settings:");
                     if(!scene.recovery_entry.empty() && inside(D2D1::RectF(r.left+20,r.bottom-33,r.right-55,r.bottom-8),x,y)) {
-                        if(scene.desktop) {PostMessageW(hwnd,WM_CLOSE,0,0);return;}
+                        if(scene.desktop) {return_to_windows();return;}
                         const auto result=reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd,L"open",scene.recovery_entry.c_str(),nullptr,nullptr,SW_SHOWNORMAL));
                         if(result>32) { scene.machine.recover(now()); PostMessageW(hwnd,WM_CLOSE,0,0); }
                         else MessageBoxW(hwnd,L"The recovery launcher could not start. Use the documented Task Manager recovery command.",L"MinimaDock",MB_OK|MB_ICONERROR);
@@ -3630,7 +3749,7 @@ public:
             if(scene.machine.progress()>.85f&&inside(scene.desktop_button_rect(),x,y)){action(static_cast<int>(scene.shown_groups())+4);return;}
             if(inside(scene.launcher_rect(),x,y)) {action(0);return;}
             for(size_t i=0;i<scene.shown_groups();++i)if(inside(scene.app_rect(i),x,y)){action(static_cast<int>(i)+1);return;}
-            if(scene.machine.progress()>.01f&&inside(scene.media_rect(),x,y)) {
+            if(scene.show_media&&scene.machine.progress()>.01f&&inside(scene.media_rect(),x,y)) {
                 for(size_t i=0;i<3;++i)if(inside(scene.media_button(i),x,y)){action(static_cast<int>(scene.shown_groups())+5+static_cast<int>(i));return;}
             }
             if(scene.machine.progress()>.85f&&inside(scene.system_rect(),x,y)) {
@@ -3839,8 +3958,9 @@ public:
             volume.start(hwnd);read_volume();
             connectivity.start(hwnd);updates.start(hwnd);launcher_index.start(hwnd);file_search.start(hwnd);
             if(live_dock){const bool on=load_windows_key_setting();windows_key.enable(on);windows_key.start(hwnd);scene.windows_key_on=on;}
+            reserve_bar(dock_settings.style==DockSettings::Style::Bar&&!dock_settings.bar_autohide);
             windows_pin_ids=pin_ids(windows_pins());pin_watch.start(hwnd,pins_folder_message,taskbar_pins_folder());
-            prayer_settings=load_prayer_settings();prayers.start(hwnd,prayer_settings.website);
+            prayer_settings=load_prayer_settings();prayers.start(hwnd,prayer_settings);
             // Attention requests (FlashWindow) arrive as HSHELL_FLASH.
             shell_hook=RegisterWindowMessageW(L"SHELLHOOK");if(shell_hook&&!RegisterShellHookWindow(hwnd))shell_hook=0;
             if(scene.desktop)tray.prepare(hwnd);
@@ -3855,6 +3975,7 @@ public:
         case WM_APP+87: return static_cast<LRESULT>(scene.dock().left*1000);
         case WM_APP+86: return static_cast<LRESULT>(scene.layout().launcher_x()*1000);
         case WM_APP+40: return layer_presented&&inventory_loaded&&(!scene.desktop||tray.ready())?1:0;
+        case WM_APP+120: return bar_reserved?1:0; // Asked by the trial supervisor.
         // Read-only diagnostics used by native component checks; no external input hook.
         case WM_APP+41: return static_cast<LRESULT>(scene.machine.state());
         case WM_APP+42: return static_cast<LRESULT>(scene.shown_groups());
@@ -3909,7 +4030,7 @@ public:
         case volume_changed_message:if(w==1)volume.refresh();read_volume();schedule();return 0;
         case connectivity_changed_message:scene.net=connectivity.snapshot();schedule();return 0;
         case updates_changed_message:scene.updates=updates.status();schedule();return 0;
-        case prayer_times_message:prayer_tick();return 0;
+        case prayer_times_message:prayer_tick();customize.prayer_updated();return 0;
         case windows_key_message:windows_key_pressed();return 0;
         case file_search_message:
             if(w==0)files_arrived();
@@ -4230,7 +4351,7 @@ public:
             KillTimer(hwnd,hover_timer);KillTimer(hwnd,previews_timer);previews.close(false);
             volume.stop();if(shell_hook)DeregisterShellHookWindow(hwnd);
             KillTimer(hwnd,settings_timer);KillTimer(hwnd,countdown_timer);KillTimer(hwnd,capture_timer);stop_alarm();alarm_card.close(false);
-            connectivity.stop();updates.stop();launcher_index.stop();file_search.stop();windows_key.stop();pin_watch.stop();KillTimer(hwnd,pins_timer);
+            connectivity.stop();updates.stop();customize.close();reserve_bar(false);launcher_index.stop();file_search.stop();windows_key.stop();pin_watch.stop();KillTimer(hwnd,pins_timer);
             prayer_toast.close();prayers.stop();
             media.stop();
             calendar.close(false);
@@ -4268,7 +4389,7 @@ int run_desktop_dock(HINSTANCE instance) {
     klass.hCursor=LoadCursorW(nullptr,IDC_ARROW);klass.lpszClassName=L"MinimaDock.DesktopDock";
     if(!RegisterClassW(&klass))return 1;
     const DWORD surface=dock.glass_mode?WS_EX_NOREDIRECTIONBITMAP:WS_EX_LAYERED;
-    const auto hwnd=CreateWindowExW(surface|WS_EX_TOOLWINDOW|WS_EX_TOPMOST,klass.lpszClassName,L"MinimaDock — Temporary taskbar test",WS_POPUP,0,0,1000,440,nullptr,nullptr,instance,&dock);
+    const auto hwnd=CreateWindowExW(surface|WS_EX_TOOLWINDOW|WS_EX_TOPMOST,klass.lpszClassName,L"MinimaDock",WS_POPUP,0,0,1000,440,nullptr,nullptr,instance,&dock);
     if(!hwnd)return 1;
     dock.desktop_position();ShowWindow(hwnd,SW_SHOWNOACTIVATE);InvalidateRect(hwnd,nullptr,FALSE);
     MSG message{};while(GetMessageW(&message,nullptr,0,0)>0){TranslateMessage(&message);DispatchMessageW(&message);}
@@ -4322,10 +4443,14 @@ int benchmark_dock_render(HINSTANCE instance,const std::wstring& path) {
         DestroyWindow(window);return output?0:1;
     }catch(...){return 1;}
 }
+static bool snapshot_desktop=false;
+void snapshot_over_desktop(bool on){snapshot_desktop=on;}
 int save_preview_snapshot(const std::wstring& path, bool expanded,int panel) {
     try {
-        Scene scene; scene.initialize();scene.desktop=panel>=3&&panel<=13;
-        const UINT image_width=scene.desktop?1000:1160,image_height=(panel>=4&&panel<=6)||(panel>=8&&panel<=13)?88:(scene.desktop?440:740);
+        Scene scene; scene.initialize();scene.desktop=(panel>=3&&panel<=13)||panel==25||snapshot_desktop;
+        if(panel==25){scene.bar=true;scene.machine.hold(Hold::Bar,true,0);} // Full-width bar style.
+        const bool small=scene.desktop&&!snapshot_desktop;
+        const UINT image_width=small?1000:1160,image_height=(panel>=4&&panel<=6)||(panel>=8&&panel<=13)?88:(small?440:740);
         scene.width=static_cast<float>(image_width);scene.height=static_cast<float>(image_height);
         ComPtr<IWICImagingFactory> wic;
         check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(wic.put())));

@@ -174,7 +174,12 @@ private:
     ComPtr<ID2D1LinearGradientBrush> tint_,tooltip_,sheen_,underglow_,rim_,glint_;
     bool built_=false;unsigned built_key_=~0u;
     static void check(HRESULT hr){if(FAILED(hr))throw hr;}
-    unsigned key() const{return (palette.light?1u:0u)|(live?2u:0u)|(boost?4u:0u);}
+    unsigned key() const {
+        unsigned h=(palette.light?1u:0u)|(live?2u:0u)|(boost?4u:0u);
+        for(const auto& c:{palette.tint_top,palette.tint_bottom,palette.solid_top,palette.solid_bottom,palette.tooltip_top,palette.tooltip_bottom})
+            for(const float v:{c.r,c.g,c.b,c.a}){h^=static_cast<unsigned>(std::lround(v*255))+0x9e3779b9u+(h<<6)+(h>>2);}
+        return h|1u<<31; // Never ~0u (the "not built" marker).
+    }
     static D2D1_COLOR_F alpha(D2D1_COLOR_F c,float a){c.a=std::clamp(a,0.0f,1.0f);return c;}
     ComPtr<ID2D1LinearGradientBrush> gradient(std::initializer_list<D2D1_GRADIENT_STOP> stops) {
         ComPtr<ID2D1GradientStopCollection> collection;std::vector<D2D1_GRADIENT_STOP> values(stops);

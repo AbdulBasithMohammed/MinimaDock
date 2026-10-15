@@ -53,7 +53,7 @@ $binaries=@(foreach($name in @('MinimaDock.exe','MinimaDockGuard.exe','MinimaDoc
 [ordered]@{
     Product='MinimaDock'
     Version=$versionMatch.Groups[1].Value
-    Stage='Framed preview and guarded temporary Explorer-backed taskbar test'
+    Stage='Per-user install; Explorer-backed taskbar replacement started at sign-in'
     Architecture='x64'
     PackagedUtc=[DateTime]::UtcNow.ToString('o')
     Binaries=$binaries

@@ -22,7 +22,7 @@ function Invoke-DockRenderProbe([string]$Executable,[string]$Snapshot) {
 function Assert-DockLaunchable([string]$Executable) {
     $path=[IO.Path]::GetFullPath($Executable)
     $snapshot=Join-Path ([IO.Path]::GetDirectoryName($path)) ('launch-check-'+[guid]::NewGuid().ToString('N')+'.png')
-    $blocked='Windows Application Control blocked MinimaDock.exe. This build needs to be accepted by your Windows signing policy. Deployment stopped before starting the supervisor or changing the current taskbar.'
+    $blocked='Windows blocked MinimaDock.exe (Smart App Control or an app control policy; MinimaDock is not code-signed). Nothing was changed and your Windows taskbar is untouched.'
     try {
         try {$code=Invoke-DockRenderProbe $path $snapshot} catch {
             $exception=$_.Exception
