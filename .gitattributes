@@ -1,0 +1,4 @@
+# Files embedded in the executable keep LF everywhere, so a checkout on any
+# machine (including CI) builds byte-identical binaries.
+src/app/app.manifest text eol=lf
+src/app/*.rc text eol=lf
