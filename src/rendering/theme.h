@@ -45,7 +45,7 @@ inline Palette palette(bool light) {
         p.separator=rgb(0xffffff,.12f);p.field=rgb(0x000000,.30f);p.tile=rgb(0xffffff,.065f);p.tile_edge=rgb(0xffffff,.10f);p.track=rgb(0xffffff,.16f);
         p.accent=rgb(0x9ebaf0);p.on_accent=rgb(0x0e1118);p.running=rgb(0xf4f5f8,.78f);
         p.tint_top=rgb(0x1c1c22,.46f);p.tint_bottom=rgb(0x0a0a0d,.60f);
-        p.solid_top=rgb(0x222228,.94f);p.solid_bottom=rgb(0x0c0c0f,.96f);p.boost=.16f;
+        p.solid_top=rgb(0x222228);p.solid_bottom=rgb(0x0c0c0f);p.boost=.16f; // Solid is opaque: no blur hides what is behind.
         p.sheen=.10f;p.underglow=.05f;p.rim_top=.46f;p.rim_mid=.07f;p.rim_bottom=.16f;p.glint=.62f;p.edge=.42f;p.grain=.045f;p.shadow=1;
         p.edge_color=rgb(0x000000);p.shadow_color=rgb(0x000000);
         p.tooltip_top=rgb(0x26262c,.72f);p.tooltip_bottom=rgb(0x16161a,.80f);
@@ -55,7 +55,7 @@ inline Palette palette(bool light) {
         p.separator=rgb(0x000000,.11f);p.field=rgb(0xffffff,.55f);p.tile=rgb(0x000000,.045f);p.tile_edge=rgb(0x000000,.07f);p.track=rgb(0x000000,.14f);
         p.accent=rgb(0x2f5fb8);p.on_accent=rgb(0xffffff);p.running=rgb(0x15171c,.70f);
         p.tint_top=rgb(0xfbfbfd,.56f);p.tint_bottom=rgb(0xececf1,.66f);
-        p.solid_top=rgb(0xf8f8fa,.96f);p.solid_bottom=rgb(0xe8e8ed,.97f);p.boost=.18f;
+        p.solid_top=rgb(0xf8f8fa);p.solid_bottom=rgb(0xe8e8ed);p.boost=.18f;
         p.sheen=.30f;p.underglow=.20f;p.rim_top=.90f;p.rim_mid=.30f;p.rim_bottom=.55f;p.glint=.95f;p.edge=.16f;p.grain=.03f;p.shadow=.55f;
         p.edge_color=rgb(0x000000);p.shadow_color=rgb(0x000000);
         p.tooltip_top=rgb(0xffffff,.78f);p.tooltip_bottom=rgb(0xf2f2f5,.84f);

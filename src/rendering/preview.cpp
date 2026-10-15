@@ -21,6 +21,7 @@
 #include "windows/connectivity.h"
 #include "windows/updates.h"
 #include "windows/prayer_times.h"
+#include "windows/app_update.h"
 #include <tlhelp32.h>
 #include <mmsystem.h>
 #include "taskbar/state_machine.h"
@@ -61,7 +62,7 @@ namespace {
 constexpr UINT inventory_ready = WM_APP + 1, windows_changed = WM_APP + 2, visibility_changed=WM_APP+3;
 constexpr UINT foreground_changed=WM_APP+4,names_changed=WM_APP+5;
 constexpr UINT_PTR frame_timer = 1, reconcile_timer = 2, clock_timer = 3, media_title_timer=4, tray_timer=5, desktop_timer=6, popup_input_timer=7, render_retry_timer=8, hover_timer=9, previews_timer=10, preview_delay_timer=16,
-    settings_timer=11, countdown_timer=12, alarm_timer=13, capture_timer=14, pins_timer=17, caret_timer=18, return_focus_timer=19;
+    settings_timer=11, countdown_timer=12, alarm_timer=13, capture_timer=14, pins_timer=17, caret_timer=18, return_focus_timer=19, hide_delay_timer=20;
 // Timer alarm card events (WM_APP+20..22 belong to the trial supervisor).
 constexpr UINT alarm_event_message=WM_APP+24,control_list_message=WM_APP+30,pins_folder_message=WM_APP+31;
 HWND event_target = nullptr;
@@ -301,7 +302,7 @@ public:
             {LaunchAction::Lock,L"Lock",L"lock"},{LaunchAction::Sleep,L"Sleep",L"sleep suspend"},{LaunchAction::Restart,L"Restart",L"restart reboot"},
             {LaunchAction::Shutdown,L"Shut down",L"shut down shutdown power off"},{LaunchAction::SignOut,L"Sign out",L"sign out log off logout"},
             {LaunchAction::StartMenu,L"Open Start menu",L"start menu windows"},
-            {LaunchAction::Customize,L"Customize MinimaDock",L"customize settings theme color appearance dock taskbar bar prayer masjid"},
+            {LaunchAction::Customize,L"MinimaDock settings",L"customize settings theme color appearance dock taskbar bar prayer masjid"},
             {LaunchAction::WinKeyStart,L"Windows key opens Start",L"windows key win start menu restore default"},
             {LaunchAction::WinKeyDock,L"Windows key opens MinimaDock",L"windows key win launcher"},
         };
@@ -2299,7 +2300,7 @@ public:
     void open_customize() {
         dismiss_panel();
         CustomizeHooks hooks;
-        hooks.version=L"1.0.0";
+        hooks.version=app_version;
         hooks.dock_changed=[this](const DockSettings& s){apply_dock_settings(s);};
         hooks.prayer_changed=[this](const PrayerSettings& s,bool website){
             const bool restart=website||s.method!=prayer_settings.method||s.calculate!=prayer_settings.calculate||s.latitude!=prayer_settings.latitude||s.longitude!=prayer_settings.longitude;
@@ -2315,6 +2316,11 @@ public:
             hooks.return_to_windows=[this]{customize.close();return_to_windows();};
             hooks.start_with_windows=[]{return starts_with_windows();};
             hooks.set_start_with_windows=[](bool on){set_starts_with_windows(on);};
+            hooks.update_status=[this]{return app_updater.status();};
+            hooks.check_updates=[this]{app_updater.check();};
+            hooks.install_update=[this]{start_update();};
+            hooks.auto_update=[]{return load_auto_update_setting();};
+            hooks.set_auto_update=[this](bool on){save_auto_update_setting(on);app_updater.set_automatic(on);};
         }
         hooks.clear_history=[this]{RegDeleteTreeW(HKEY_CURRENT_USER,L"Software\\MinimaDock\\Launcher\\Usage");scene.launch_usage.clear();};
         hooks.reset_everything=[this]{
@@ -2337,11 +2343,14 @@ public:
     }
     WindowsKey windows_key;
     // Windows key tapped alone: toggle the launcher, revealing an auto-hidden dock.
+    bool launcher_over_fullscreen=false;
     void windows_key_pressed() {
         if(!live_dock)return;
-        if(scene.panel==Panel::Launcher){dismiss_panel(true);return;}
+        if(scene.panel==Panel::Launcher){dismiss_panel(true);fullscreen();return;}
         fullscreen();
-        if(!scene.machine.visible())return;
+        // Over a full-screen game or video the dock is suppressed: show it with the
+        // launcher anyway; it hides again once the launcher closes.
+        if(!scene.machine.visible()){launcher_over_fullscreen=true;scene.machine.suppress(false,now());}
         SetForegroundWindow(hwnd);SetFocus(hwnd);
         scene.machine.hold(Hold::Keyboard,true,now());
         if(scene.panel!=Panel::None)dismiss_panel();
@@ -2531,6 +2540,7 @@ public:
     }
     // ---- Prayer times (masjid website) ----
     PrayerService prayers;
+    AppUpdater app_updater; // MinimaDock's own updates (live dock only).
     PrayerSettings prayer_settings;
     std::vector<int> prayer_fired;
     int prayer_fired_day=0;
@@ -2872,6 +2882,7 @@ public:
         const bool owned=foreground==hwnd||foreground==calendar.window()||foreground==search;
         set_panel(Panel::None);scene.focus=-1;scene.machine.hold(Hold::Keyboard,false,now());
         if(restore_focus&&owned&&IsWindow(last_foreground))SetForegroundWindow(last_foreground);
+        if(launcher_over_fullscreen)fullscreen(); // Back to the game: hide again.
         schedule();
     }
     bool popup_contains(POINT point) const {
@@ -2901,7 +2912,7 @@ public:
         if(msg==WM_MOUSEACTIVATE)return MA_NOACTIVATE;
         if(msg==WM_MOUSEMOVE&&self->auto_hidden&&self->scene.machine.visible()) {
             if(!self->edge_tracking){TRACKMOUSEEVENT t{sizeof(t),TME_LEAVE,window,0};TrackMouseEvent(&t);self->edge_tracking=true;}
-            self->scene.machine.hold(Hold::Pointer,true,self->now());self->schedule();return 0;
+            self->hover_hold(true);self->schedule();return 0;
         }
         if(msg==WM_MOUSELEAVE){self->edge_tracking=false;self->pointer_hold();self->schedule();return 0;}
         return DefWindowProcW(window,msg,w,l);
@@ -2966,7 +2977,17 @@ public:
             over=visibility.wanted()&&(inside(r,x,y)||inside(r,x,y-visibility.offset())||(scene.panel!=Panel::None&&scene.panel!=Panel::Calendar&&inside(scene.panel_rect(),x,y)));
             scene.pointer_x=x;scene.pointer_y=y-visibility.offset();
         }
-        scene.machine.hold(Hold::Pointer,over||edge_tracking,now());
+        hover_hold(over||edge_tracking);
+    }
+    // Settings > Dock > Hide delay: a revealed dock (one that hides) stays up this
+    // long after the pointer leaves. Revealing is always immediate.
+    bool hide_delay_pending=false,hide_delay_done=false;
+    void hover_hold(bool over) {
+        if(over){if(hide_delay_pending){KillTimer(hwnd,hide_delay_timer);hide_delay_pending=false;}scene.machine.hold(Hold::Pointer,true,now());return;}
+        const bool held=(scene.machine.holds()&static_cast<unsigned>(Hold::Pointer))!=0;
+        if(!held||hide_delay_done||dock_settings.hide_delay<=0||!auto_hidden){scene.machine.hold(Hold::Pointer,false,now());return;}
+        if(!hide_delay_pending)hide_delay_pending=SetTimer(hwnd,hide_delay_timer,static_cast<UINT>(dock_settings.hide_delay),nullptr)!=0;
+        if(!hide_delay_pending)scene.machine.hold(Hold::Pointer,false,now());
     }
     void sync_visibility() {
         if(!live_dock)return;
@@ -3060,12 +3081,15 @@ public:
         // the work area is smaller (the persistent bar or another reservation):
         // ordinary maximized windows stop at the work area.
         const auto fills=[&](const RECT& r){return r.left<=info.rcMonitor.left&&r.top<=info.rcMonitor.top&&r.right>=info.rcMonitor.right&&r.bottom>=info.rcMonitor.bottom;};
-        const bool covers=foreground&&owner!=GetCurrentProcessId()&&!desktop&&!IsIconic(foreground)&&
+        bool covers=foreground&&owner!=GetCurrentProcessId()&&!desktop&&!IsIconic(foreground)&&
             MonitorFromWindow(foreground,MONITOR_DEFAULTTOPRIMARY)==monitor&&GetWindowRect(foreground,&bounds)&&GetMonitorInfoW(monitor,&info)&&
             (!IsZoomed(foreground)?fills(bounds):[&]{
                 RECT frame{};
                 return !EqualRect(&info.rcWork,&info.rcMonitor)&&SUCCEEDED(DwmGetWindowAttribute(foreground,DWMWA_EXTENDED_FRAME_BOUNDS,&frame,sizeof(frame)))&&fills(frame);
             }());
+        // The launcher opened with the Windows key over a full-screen app stays up until it closes.
+        if(scene.panel!=Panel::Launcher)launcher_over_fullscreen=false;
+        if(launcher_over_fullscreen)covers=false;
         if(covers) {calendar.close(false);set_panel(Panel::None,false);close_previews(false);scene.stop_feedback();}
         const bool over_window=foreground&&!desktop&&IsWindowVisible(foreground)&&!IsIconic(foreground)&&
             (IsZoomed(foreground)||window_arranged(foreground))&&MonitorFromWindow(foreground,MONITOR_DEFAULTTOPRIMARY)==monitor;
@@ -3084,12 +3108,13 @@ public:
         add_entry(sections[0],1,L"Task Manager",L'\xE9D9');
         add_entry(sections[0],2,L"Show desktop",L'\xE7C4');
         add_entry(sections[0],3,L"Quick settings",L'\xE713');
-        add_entry(sections[1],8,L"Customize MinimaDock\x2026",L'\xE771');
+        add_entry(sections[1],8,L"MinimaDock settings\x2026",L'\xE771');
         if(live_dock)add_entry(sections[1],4,windows_key.enabled()?L"Windows key opens Start":L"Windows key opens MinimaDock",L'\xE765');
         add_entry(sections[1],5,L"Windows taskbar settings",L'\xE8A9');
         if(live_dock) {
             if(supervisor_status()==1)add_entry(sections[2],6,L"Keep MinimaDock for this session",L'\xE718'); // Trial runs only.
             add_entry(sections[2],7,L"Return to the Windows taskbar",L'\xE7A7');
+            if(const auto u=app_updater.status();u.available)add_entry(sections[1],9,L"Update to MinimaDock "+u.latest,L'\xE896');
         }
         const auto d=scene.dock();POINT cursor{};GetCursorPos(&cursor);POINT client=cursor;ScreenToClient(hwnd,&client);
         const float at=x>=0?x:static_cast<float>(client.x)*96/dpi;
@@ -3100,6 +3125,7 @@ public:
             else if(id==4){const bool on=!windows_key.enabled();save_windows_key_setting(on);windows_key.enable(on);scene.windows_key_on=on;}
             else if(id==5)launch(L"ms-settings:taskbar");
             else if(id==8)open_customize();
+            else if(id==9)start_update();
             else if(id==6) {
                 wchar_t module[32768]{};GetModuleFileNameW(nullptr,module,32768);
                 const auto path=(std::filesystem::path(module).parent_path()/L"MinimaDockTrial.exe").wstring();
@@ -3116,6 +3142,11 @@ public:
     }
     // Brings the Windows taskbar back for this session (the supervisor restores
     // it and closes the dock; it would otherwise restart a closed dock).
+    // Downloads and installs the newer release in a visible PowerShell window.
+    void start_update() {
+        if(!app_updater.install(hwnd))MessageBoxW(hwnd,L"The update could not be started. You can download it from GitHub instead.",L"MinimaDock",MB_OK|MB_ICONWARNING);
+        else customize.close();
+    }
     void return_to_windows() {
         if(const auto control=supervisor())PostMessageW(control,WM_APP+20,0,0);else PostMessageW(hwnd,WM_CLOSE,0,0);
     }
@@ -3383,7 +3414,7 @@ public:
             add_entry(sections[0],4,L"File Explorer",L'\xEC50');add_entry(sections[0],5,L"Terminal",L'\xE756');
             if(live_dock)add_entry(sections[1],6,windows_key.enabled()?L"Windows key opens Start":L"Windows key opens MinimaDock",L'\xE765');
             add_entry(sections[1],7,L"Open Start menu",L'\xE8FC');
-            add_entry(sections[1],8,L"Customize MinimaDock\x2026",L'\xE771');
+            add_entry(sections[1],8,L"MinimaDock settings\x2026",L'\xE771');
             glass_menu(std::move(sections),scene.launcher_rect(),keyboard,[this](UINT id) {
                 const wchar_t* paths[]={L"ms-settings:",L"taskmgr.exe",L"explorer.exe",L"wt.exe"};
                 if(id==1)windows_key_pressed_or_open();
@@ -3961,6 +3992,7 @@ public:
             reserve_bar(dock_settings.style==DockSettings::Style::Bar&&!dock_settings.bar_autohide);
             windows_pin_ids=pin_ids(windows_pins());pin_watch.start(hwnd,pins_folder_message,taskbar_pins_folder());
             prayer_settings=load_prayer_settings();prayers.start(hwnd,prayer_settings);
+            if(live_dock)app_updater.start(hwnd,load_auto_update_setting());
             // Attention requests (FlashWindow) arrive as HSHELL_FLASH.
             shell_hook=RegisterWindowMessageW(L"SHELLHOOK");if(shell_hook&&!RegisterShellHookWindow(hwnd))shell_hook=0;
             if(scene.desktop)tray.prepare(hwnd);
@@ -4031,6 +4063,7 @@ public:
         case connectivity_changed_message:scene.net=connectivity.snapshot();schedule();return 0;
         case updates_changed_message:scene.updates=updates.status();schedule();return 0;
         case prayer_times_message:prayer_tick();customize.prayer_updated();return 0;
+        case app_update_message:customize.prayer_updated();return 0; // Redraws the settings window.
         case windows_key_message:windows_key_pressed();return 0;
         case file_search_message:
             if(w==0)files_arrived();
@@ -4101,12 +4134,12 @@ public:
             if(!tracking) { TRACKMOUSEEVENT t{sizeof(t),TME_LEAVE,hwnd,0}; TrackMouseEvent(&t); tracking=true; }
             const bool over=inside(scene.dock(),x,y)||(live_dock&&visibility.wanted()&&inside(scene.dock(),x,raw_y))||(scene.panel!=Panel::None && scene.panel!=Panel::Calendar && inside(scene.panel_rect(),x,y));
             const auto holds=scene.machine.holds();const auto state=scene.machine.state();
-            scene.machine.hold(Hold::Pointer,over,now());
+            hover_hold(over);
             // Same hovered targets and dock state: the next frame would be identical.
             if(!fresh&&holds==scene.machine.holds()&&state==scene.machine.state()&&before==scene.hover_signature(x,y))return 0;
             schedule(); return 0;
         }
-        case WM_MOUSELEAVE: tracking=false; scene.pointer_x=scene.pointer_y=-1;if(scene.dragging<0&&!scene.slider_active)hover_changed(-1);if(live_dock)pointer_hold();else scene.machine.hold(Hold::Pointer,false,now());schedule();return 0;
+        case WM_MOUSELEAVE: tracking=false; scene.pointer_x=scene.pointer_y=-1;if(scene.dragging<0&&!scene.slider_active)hover_changed(-1);if(live_dock)pointer_hold();else hover_hold(false);schedule();return 0;
         case WM_LBUTTONDOWN: {
             if(jump.visible())jump.close();
             const float x=GET_X_LPARAM(l)*96.0f/dpi,y=GET_Y_LPARAM(l)*96.0f/dpi-(live_dock?visibility.offset():0);
@@ -4256,7 +4289,13 @@ public:
             if(reinterpret_cast<HWND>(l)==search) { SetTextColor(reinterpret_cast<HDC>(w),RGB(242,244,250)); SetBkColor(reinterpret_cast<HDC>(w),RGB(20,27,37)); return reinterpret_cast<LRESULT>(edit_background); }
             return DefWindowProcW(hwnd,msg,w,l);
         case WM_TIMER:
-            if(w==popup_input_timer){POINT point{};unsigned pressed=0;const auto state=popup_input(&pressed);if(GetCursorPos(&point))poll_popup_input(state,point,pressed);}
+            if(w==hide_delay_timer) { // The delay passed: hide unless the pointer came back.
+                KillTimer(hwnd,hide_delay_timer);hide_delay_pending=false;
+                hide_delay_done=true;
+                if(live_dock)pointer_hold();else hover_hold(false);
+                hide_delay_done=false;schedule();
+            }
+            else if(w==popup_input_timer){POINT point{};unsigned pressed=0;const auto state=popup_input(&pressed);if(GetCursorPos(&point))poll_popup_input(state,point,pressed);}
             else if(w==frame_timer) {
                 const auto time=now();const bool exiting=scene.exiting_panel!=Panel::None;
                 scene.machine.tick(time);visibility.tick(time);scene.tick_feedback(time);
@@ -4351,7 +4390,7 @@ public:
             KillTimer(hwnd,hover_timer);KillTimer(hwnd,previews_timer);previews.close(false);
             volume.stop();if(shell_hook)DeregisterShellHookWindow(hwnd);
             KillTimer(hwnd,settings_timer);KillTimer(hwnd,countdown_timer);KillTimer(hwnd,capture_timer);stop_alarm();alarm_card.close(false);
-            connectivity.stop();updates.stop();customize.close();reserve_bar(false);launcher_index.stop();file_search.stop();windows_key.stop();pin_watch.stop();KillTimer(hwnd,pins_timer);
+            connectivity.stop();updates.stop();customize.close();app_updater.stop();reserve_bar(false);launcher_index.stop();file_search.stop();windows_key.stop();pin_watch.stop();KillTimer(hwnd,pins_timer);
             prayer_toast.close();prayers.stop();
             media.stop();
             calendar.close(false);

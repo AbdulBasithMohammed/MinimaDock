@@ -8,17 +8,6 @@ namespace {
 constexpr wchar_t settings_key[]=L"Software\\MinimaDock\\Launcher";
 constexpr WORD mask_key=0xE8; // Unassigned; tells Windows the Windows key was used in a shortcut.
 
-// A full-screen window (game, video) on its monitor keeps Windows' own Start behaviour.
-bool fullscreen_foreground() {
-    const auto foreground=GetForegroundWindow();if(!foreground)return false;
-    DWORD owner=0;GetWindowThreadProcessId(foreground,&owner);
-    if(owner==GetCurrentProcessId()||IsIconic(foreground)||IsZoomed(foreground))return false;
-    wchar_t klass[64]{};GetClassNameW(foreground,klass,64);
-    if(wcscmp(klass,L"Progman")==0||wcscmp(klass,L"WorkerW")==0)return false;
-    RECT bounds{};MONITORINFO info{};info.cbSize=sizeof(info);
-    if(!GetWindowRect(foreground,&bounds)||!GetMonitorInfoW(MonitorFromWindow(foreground,MONITOR_DEFAULTTONEAREST),&info))return false;
-    return bounds.left<=info.rcMonitor.left&&bounds.top<=info.rcMonitor.top&&bounds.right>=info.rcMonitor.right&&bounds.bottom>=info.rcMonitor.bottom;
-}
 }
 
 struct WindowsKey::Impl {
@@ -39,7 +28,9 @@ struct WindowsKey::Impl {
         const bool windows=key.vkCode==VK_LWIN||key.vkCode==VK_RWIN;
         if(!windows){if(down&&held)combo=true;return;}
         if(down) {
-            if(!held){held=true;combo=!on.load()||!notify.load()||fullscreen_foreground();} // Key repeat keeps the first decision.
+            // Also over full-screen games and video (user choice), so Windows'
+            // Start and its taskbar never appear. Key repeat keeps the first decision.
+            if(!held){held=true;combo=!on.load()||!notify.load();}
             return;
         }
         if(!held)return;

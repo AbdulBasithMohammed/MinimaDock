@@ -23,6 +23,7 @@ struct DockSettings {
     bool bar_autohide=false,bar_left=false;
     int icon=24;           // 20, 24 or 28 DIP.
     int magnify=122;       // Hover scale x100: 100 (off), 112, 122, 140.
+    int hide_delay=0;      // ms a revealed (hiding) dock stays up after the pointer leaves: 0, 500, 1000, 2000.
     Motion motion=Motion::Windows;
     bool media=true,date=true,clock24=false;
     bool operator==(const DockSettings&) const=default;
@@ -49,6 +50,7 @@ inline DockSettings load_dock_settings() {
     s.bar_autohide=read_dword(L"BarAutoHide",0)!=0;s.bar_left=read_dword(L"BarLeft",0)!=0;
     const DWORD icon=read_dword(L"IconSize",24);s.icon=icon==20||icon==28?static_cast<int>(icon):24;
     const DWORD magnify=read_dword(L"Magnify",122);s.magnify=magnify==100||magnify==112||magnify==140?static_cast<int>(magnify):122;
+    const DWORD delay=read_dword(L"HideDelay",0);s.hide_delay=delay==500||delay==1000||delay==2000?static_cast<int>(delay):0;
     s.motion=pick(read_dword(L"Motion",0),DockSettings::Motion::Reduced,DockSettings::Motion::Windows);
     s.media=read_dword(L"Media",1)!=0;s.date=read_dword(L"Date",1)!=0;s.clock24=read_dword(L"Clock24",0)!=0;
     return s;
@@ -59,7 +61,7 @@ inline void save_dock_settings(const DockSettings& s) {
     write_dword(L"Tint",static_cast<DWORD>(s.tint));write_dword(L"Glass",static_cast<DWORD>(s.glass));write_dword(L"Solid",s.solid);
     write_dword(L"Style",static_cast<DWORD>(s.style));write_dword(L"Hide",static_cast<DWORD>(s.hide));
     write_dword(L"BarAutoHide",s.bar_autohide);write_dword(L"BarLeft",s.bar_left);
-    write_dword(L"IconSize",static_cast<DWORD>(s.icon));write_dword(L"Magnify",static_cast<DWORD>(s.magnify));
+    write_dword(L"IconSize",static_cast<DWORD>(s.icon));write_dword(L"Magnify",static_cast<DWORD>(s.magnify));write_dword(L"HideDelay",static_cast<DWORD>(s.hide_delay));
     write_dword(L"Motion",static_cast<DWORD>(s.motion));write_dword(L"Media",s.media);write_dword(L"Date",s.date);write_dword(L"Clock24",s.clock24);
 }
 // Resets the appearance fields only (Customize > About > Reset appearance).

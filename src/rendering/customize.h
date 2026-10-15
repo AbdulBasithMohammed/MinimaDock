@@ -1,13 +1,14 @@
 #pragma once
 #include "rendering/dock_settings.h"
 #include "windows/prayer_times.h"
+#include "windows/app_update.h"
 #include <windows.h>
 #include <functional>
 #include <memory>
 #include <string>
 
 namespace minima {
-// What the Customize window reads and changes in the running dock. Every
+// What the settings window reads and changes in the running dock. Every
 // change is applied at once through these callbacks (no Save button).
 struct CustomizeHooks {
     std::function<void(const DockSettings&)> dock_changed;
@@ -21,10 +22,15 @@ struct CustomizeHooks {
     std::function<bool()> start_with_windows;    // Empty outside the live dock.
     std::function<void(bool)> set_start_with_windows;
     std::function<void()> reset_everything;
+    std::function<AppUpdateStatus()> update_status;  // Empty outside the live dock.
+    std::function<void()> check_updates;
+    std::function<void()> install_update;
+    std::function<bool()> auto_update;
+    std::function<void(bool)> set_auto_update;
     std::wstring version;
 };
-// MinimaDock's settings window ("Customize MinimaDock" on the dock's
-// right-click menu): Appearance, Dock, Prayer times, Launcher, About.
+// MinimaDock's settings window ("MinimaDock settings" on the dock's
+// right-click menu): Appearance, Dock, Prayer times, Launcher, About and updates.
 // Drawn with the dock's own glass and palette; follows changes live.
 class CustomizeWindow {
 public:

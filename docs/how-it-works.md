@@ -48,7 +48,7 @@ Click the time/date to open a calendar centered above that button, with the same
 
 ## Customize
 
-Right-click empty dock space or the MinimaDock button and choose **Customize MinimaDock...** (also a launcher action). Changes apply and save as you go (`HKCU\Software\MinimaDock\Settings`).
+Right-click empty dock space or the MinimaDock button and choose **MinimaDock settings...** (also a launcher action). Changes apply and save as you go (`HKCU\Software\MinimaDock\Settings`).
 
 Controls animate with springs (sliding highlights, toggles, rolling numbers) and pages fade up in turn; reduced motion turns this off.
 

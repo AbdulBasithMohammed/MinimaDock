@@ -24,7 +24,8 @@ stops and nothing is changed.
 Using it
 --------
 - Hover the dock to expand it. Right-click empty dock space for
-  "Customize MinimaDock..." (theme, colours, full-width bar, prayer times).
+  "MinimaDock settings..." (theme, colours, full-width bar, prayer times,
+  updates).
 - Prayer times: add your masjid's website in Customize > Prayer times.
   Until then no prayer times are shown.
 - Ctrl+Alt+Backspace brings back the Windows taskbar until you sign in again.

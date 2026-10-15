@@ -22,7 +22,7 @@ constexpr float window_width=820,window_height=580,side_width=204,pad=26,row_hei
 constexpr float margin_x=24,margin_top=16,margin_bottom=30; // Room for the glass shadow.
 enum class Page {Look,Dock,Prayer,Launch,About};
 constexpr Page pages[]={Page::Look,Page::Dock,Page::Prayer,Page::Launch,Page::About};
-const wchar_t* page_name(Page p){switch(p){case Page::Look:return L"Appearance";case Page::Dock:return L"Dock";case Page::Prayer:return L"Prayer times";case Page::Launch:return L"Launcher";default:return L"About and recovery";}}
+const wchar_t* page_name(Page p){switch(p){case Page::Look:return L"Appearance";case Page::Dock:return L"Dock";case Page::Prayer:return L"Prayer times";case Page::Launch:return L"Launcher";default:return L"About and updates";}}
 wchar_t page_glyph(Page p){switch(p){case Page::Look:return L'\xE790';case Page::Dock:return L'\xE8A9';case Page::Prayer:return L'\xE708';case Page::Launch:return L'\xE721';default:return L'\xE946';}}
 const wchar_t* page_lede(Page p) {
     switch(p) {
@@ -227,8 +227,10 @@ struct CustomizeWindow::Impl {
         }
         return x;
     }
-    float slider(float right,float cy,int value,std::function<void(int)> set) {
+    // Disabled sliders are drawn faded and ignore the pointer.
+    float slider(float right,float cy,int value,std::function<void(int)> set,bool enabled=true) {
         const float w=170,left=right-w;
+        if(!enabled)t->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(),nullptr,D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,D2D1::IdentityMatrix(),.35f),nullptr);
         text(L"Clear",D2D1::RectF(left-48,cy-10,left-8,cy+10),f_small.get(),pal.ink_secondary,DWRITE_TEXT_ALIGNMENT_TRAILING);
         const float track_left=left,track_right=right-42;
         text(L"Solid",D2D1::RectF(track_right+8,cy-10,right,cy+10),f_small.get(),pal.ink_secondary);
@@ -240,7 +242,8 @@ struct CustomizeWindow::Impl {
         color(pal.tile_edge);t->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(k,cy),9,9),brush.get(),1);
         color(pal.accent);t->FillEllipse(D2D1::Ellipse(D2D1::Point2F(k,cy),slider_drag?5.5f:4.5f,slider_drag?5.5f:4.5f),brush.get());
         const auto at=[set,track_left,track_right](float x){set(static_cast<int>(std::lround(std::clamp((x-track_left)/(track_right-track_left),0.0f,1.0f)*100)));};
-        hits.push_back({D2D1::RectF(track_left-10,cy-14,track_right+10,cy+14),[at](float x,float){at(x);},true,at});
+        if(enabled)hits.push_back({D2D1::RectF(track_left-10,cy-14,track_right+10,cy+14),[at](float x,float){at(x);},true,at});
+        else t->PopLayer();
         return left-56;
     }
     // A single-line text field; `id` identifies which setting it edits.
@@ -330,7 +333,7 @@ struct CustomizeWindow::Impl {
                 std::vector<std::pair<D2D1_COLOR_F,D2D1_COLOR_F>> c;for(const auto& t2:tints)c.push_back({theme::rgb(t2[0]),theme::rgb(t2[1])});
                 return swatches(r,cy,c,static_cast<int>(dock.tint),[this](int i){dock.tint=static_cast<DockSettings::Tint>(i);changed_dock();},nullptr);
             }},
-            {L"Glass",L"How much of what is behind the dock shows through.",row_height,[this](float r,float cy,float,float){return slider(r,cy,dock.glass,[this](int v){if(v!=dock.glass){dock.glass=v;changed_dock();}});}},
+            {L"Glass",dock.solid?L"Not used while solid colors are on.":L"How much of what is behind the dock shows through.",row_height,[this](float r,float cy,float,float){return slider(r,cy,dock.glass,[this](int v){if(v!=dock.glass){dock.glass=v;changed_dock();}},!dock.solid);}},
             {L"Use solid colors",L"No blur or transparency (also when Windows transparency is off).",row_height,[this](float r,float cy,float,float){return toggle(r,cy,dock.solid,[this](bool v){dock.solid=v;changed_dock();});}},
         });
         return y;
@@ -347,6 +350,7 @@ struct CustomizeWindow::Impl {
         }
         first.push_back({L"Icon size",L"",row_height,[this](float r,float cy,float,float){return segmented(r,cy,{L"Small",L"Default",L"Large"},dock.icon==20?0:dock.icon==28?2:1,[this](int i){dock.icon=i==0?20:i==2?28:24;changed_dock();});}});
         first.push_back({L"Hover magnification",L"How much an icon grows under the pointer.",row_height,[this](float r,float cy,float,float){return segmented(r,cy,{L"Off",L"Subtle",L"Default",L"Big"},dock.magnify==100?0:dock.magnify==112?1:dock.magnify==140?3:2,[this](int i){static const int v[]={100,112,122,140};dock.magnify=v[i];changed_dock();});}});
+        first.push_back({L"Hide delay",L"How long the dock stays up after the pointer leaves, before it hides again.",row_height,[this](float r,float cy,float,float){return segmented(r,cy,{L"None",L"0.5 s",L"1 s",L"2 s"},dock.hide_delay==500?1:dock.hide_delay==1000?2:dock.hide_delay==2000?3:0,[this](int i){static const int v[]={0,500,1000,2000};dock.hide_delay=v[i];changed_dock();});}});
         first.push_back({L"Animations",L"Follow Windows uses its Animation effects setting.",row_height,[this](float r,float cy,float,float){return segmented(r,cy,{L"Follow Windows",L"Full",L"Reduced"},static_cast<int>(dock.motion),[this](int i){dock.motion=static_cast<DockSettings::Motion>(i);changed_dock();});}});
         y=group(left,right,y,first);
         y=group(left,right,y,{
@@ -421,6 +425,23 @@ struct CustomizeWindow::Impl {
         return y;
     }
     float about_page(float left,float right,float y) {
+        if(hooks.update_status) {
+            const auto u=hooks.update_status();
+            std::wstring status;
+            if(u.checking)status=L"Checking for updates\x2026";
+            else if(u.available)status=L"Version "+u.latest+L" is available.";
+            else if(!u.error.empty())status=L"Couldn't check for updates: "+u.error+L".";
+            else if(u.checked)status=L"You're up to date. Checked at "+u.checked_at+L".";
+            else status=L"Not checked yet.";
+            y=group(left,right,y,{
+                {L"MinimaDock "+hooks.version,status,row_height,[this,u](float r,float cy,float,float){
+                    if(u.available)return button(r,cy,L"Update to "+u.latest,[this]{if(hooks.install_update)hooks.install_update();},true);
+                    return button(r,cy,L"Check now",[this]{if(hooks.check_updates)hooks.check_updates();redraw();});
+                }},
+                {L"Check for updates automatically",L"Once a day from GitHub. Updates install only when you choose.",row_height,[this](float r,float cy,float,float){
+                    return toggle(r,cy,hooks.auto_update&&hooks.auto_update(),[this](bool v){if(hooks.set_auto_update)hooks.set_auto_update(v);redraw();});}},
+            });
+        }
         std::vector<Row> rows;
         if(hooks.start_with_windows)rows.push_back({L"Start with Windows",L"MinimaDock replaces the taskbar each time you sign in.",row_height,[this](float r,float cy,float,float){return toggle(r,cy,hooks.start_with_windows(),[this](bool v){if(hooks.set_start_with_windows)hooks.set_start_with_windows(v);redraw();});}});
         if(hooks.return_to_windows)rows.push_back({L"Return to the Windows taskbar",L"Until you sign in again (Ctrl+Alt+Backspace). Pins and settings are kept.",row_height,[this](float r,float cy,float,float){return button(r,cy,L"Return now",[this]{hooks.return_to_windows();});}});
@@ -672,7 +693,7 @@ struct CustomizeWindow::Impl {
         if(const auto shcore=GetModuleHandleW(L"shcore.dll"))if(const auto get=reinterpret_cast<HRESULT(WINAPI*)(HMONITOR,int,UINT*,UINT*)>(reinterpret_cast<void*>(GetProcAddress(shcore,"GetDpiForMonitor"))))if(SUCCEEDED(get(monitor,0,&x_dpi,&y_dpi)))dpi=x_dpi;
         size_to_dpi();
         const int x=(info.rcWork.left+info.rcWork.right-static_cast<int>(pixel_width))/2,y=(info.rcWork.top+info.rcWork.bottom-static_cast<int>(pixel_height))/2;
-        hwnd=CreateWindowExW((composed?WS_EX_NOREDIRECTIONBITMAP:0)|WS_EX_APPWINDOW,klass.lpszClassName,L"Customize MinimaDock",WS_POPUP|WS_MINIMIZEBOX,
+        hwnd=CreateWindowExW((composed?WS_EX_NOREDIRECTIONBITMAP:0)|WS_EX_APPWINDOW,klass.lpszClassName,L"MinimaDock settings",WS_POPUP|WS_MINIMIZEBOX,
             x,y,static_cast<int>(pixel_width),static_cast<int>(pixel_height),nullptr,nullptr,klass.hInstance,this);
         if(!hwnd)return;
         dpi=GetDpiForWindow(hwnd);size_to_dpi();
@@ -699,7 +720,7 @@ int save_customize_snapshot(const std::wstring& path,int page) {
     ComPtr<IWICImagingFactory> wic;
     if(FAILED(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(wic.put()))))return 1;
     ui.dock=load_dock_settings();ui.prayer=PrayerSettings{};ui.pal=dock_palette(ui.dock);ui.live=false;ui.reduced=true;ui.composed=false;
-    ui.page=pages[std::clamp(page,0,4)];ui.hooks.version=L"1.0.0";
+    ui.page=pages[std::clamp(page,0,4)];ui.hooks.version=app_version;
     ui.hooks.windows_key=[]{return true;};ui.hooks.return_to_windows=[]{};ui.hooks.start_with_windows=[]{return true;};
     ui.hooks.prayer_status=[]{
         PrayerSnapshot s;s.have=true;s.updated=L"9:02 AM";s.method=L"GalaxyStream widget";

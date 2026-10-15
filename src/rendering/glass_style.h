@@ -193,7 +193,7 @@ private:
         const auto& p=palette;const float extra=boost?p.boost:0;
         const auto top=live?alpha(p.tint_top,p.tint_top.a+extra):p.solid_top,bottom=live?alpha(p.tint_bottom,p.tint_bottom.a+extra):p.solid_bottom;
         tint_=gradient({{0,top},{1,bottom}});
-        tooltip_=gradient({{0,live?alpha(p.tooltip_top,p.tooltip_top.a+extra):alpha(p.solid_top,.97f)},{1,live?alpha(p.tooltip_bottom,p.tooltip_bottom.a+extra):alpha(p.solid_bottom,.98f)}});
+        tooltip_=gradient({{0,live?alpha(p.tooltip_top,p.tooltip_top.a+extra):p.solid_top},{1,live?alpha(p.tooltip_bottom,p.tooltip_bottom.a+extra):p.solid_bottom}});
         const auto white=theme::rgb(0xffffff);
         sheen_=gradient({{0,alpha(white,p.sheen)},{1,alpha(white,0)}});
         underglow_=gradient({{0,alpha(white,0)},{1,alpha(white,p.underglow)}});

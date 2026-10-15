@@ -66,7 +66,7 @@ Theme, accent colour, glass tint and strength, icon size, magnification, motion,
 <td align="center" width="50%"><img src="docs/images/prayer.png" alt="Calendar with prayer times and the Adhan card"><br><sub><b>Calendar and prayers</b>: Adhan and Iqama at a glance</sub></td>
 </tr>
 <tr>
-<td align="center" width="50%"><img src="docs/images/customize.png" alt="Customize MinimaDock window"><br><sub><b>Customize</b>: right-click the dock</sub></td>
+<td align="center" width="50%"><img src="docs/images/customize.png" alt="MinimaDock settings window"><br><sub><b>Settings</b>: right-click the dock</sub></td>
 <td align="center" width="50%"><img src="docs/images/styles.png" alt="Floating dock and full-width bar styles"><br><sub><b>Two styles</b>: floating pill or full-width bar</sub></td>
 </tr>
 </table>
@@ -81,6 +81,10 @@ That's it. MinimaDock starts right away and every time you sign in. No administr
 
 > [!NOTE]
 > MinimaDock is not code-signed yet. Windows may say *"Windows protected your PC"*: choose **More info > Run anyway**. If **Smart App Control** blocks it, the installer stops and changes nothing.
+
+### Updates
+
+MinimaDock checks GitHub once a day. When a new version is out, **Update** appears in the dock's right-click menu and in Settings > About and updates; one click downloads it, checks it and installs it. Nothing installs without you choosing it.
 
 ### Uninstall
 
@@ -107,7 +111,7 @@ Double-click **`Uninstall MinimaDock.cmd`**, or go to **Settings > Apps > Instal
 - **Nothing is removed.** Explorer keeps running; MinimaDock only hides its taskbar while it runs.
 - **Always recoverable.** The original taskbar state is saved before anything is hidden and restored on uninstall, sign-out, a crash or even a power cut.
 - **Self-healing.** If the dock crashes it restarts by itself; if it keeps failing, your Windows taskbar comes back automatically.
-- **Private.** Searches stay on your PC. The only internet requests are the prayer-times website you choose (and the widget hosts it names).
+- **Private.** Searches stay on your PC. The only internet requests are the prayer-times website you choose (and the widget hosts it names) and a daily update check on GitHub, which you can turn off.
 
 ## ❓ FAQ
 
@@ -120,7 +124,7 @@ No. It installs to <code>%LOCALAPPDATA%\Programs\MinimaDock</code> and adds itse
 <details>
 <summary><b>How do I set up prayer times?</b></summary>
 <br>
-Right-click empty space on the dock > <b>Customize MinimaDock</b> > <b>Prayer times</b>, and paste your masjid's website. MinimaDock tries several ways of reading it and checks the times make sense. If the site can't be read it can calculate Adhan times for your location. Until you add a website, no prayer times are shown.
+Right-click empty space on the dock > <b>MinimaDock settings</b> > <b>Prayer times</b>, and paste your masjid's website. MinimaDock tries several ways of reading it and checks the times make sense. If the site can't be read it can calculate Adhan times for your location. Until you add a website, no prayer times are shown.
 </details>
 
 <details>
@@ -132,7 +136,7 @@ Smart App Control only allows apps it trusts, and MinimaDock is a new, unsigned 
 <details>
 <summary><b>How do I go back to the normal taskbar?</b></summary>
 <br>
-For this session: <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Backspace</kbd>, or right-click the dock > <b>Return to the Windows taskbar</b>. To stop it starting with Windows: Customize > About > <b>Start with Windows</b>. To remove it completely: run <b>Uninstall MinimaDock.cmd</b>.
+For this session: <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Backspace</kbd>, or right-click the dock > <b>Return to the Windows taskbar</b>. To stop it starting with Windows: Settings > About and updates > <b>Start with Windows</b>. To remove it completely: run <b>Uninstall MinimaDock.cmd</b>.
 </details>
 
 ## 🛠️ Build from source
