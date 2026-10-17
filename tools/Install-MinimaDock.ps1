@@ -6,8 +6,32 @@
 #   Stop       bring back the Windows taskbar until the next sign-in
 #   Start      start the installed MinimaDock again
 #   Status     report whether it is running and starts with Windows
-param([ValidateSet('Install','Uninstall','Stop','Start','Status')][string]$Action='Install')
+param([ValidateSet('Install','Uninstall','Stop','Start','Status')][string]$Action='Install',[switch]$Outside,[string]$Log)
 $ErrorActionPreference='Stop'
+if($Log){Start-Transcript -LiteralPath $Log -Force | Out-Null}
+
+# Claude Code's desktop app runs in a packaged (MSIX) container that virtualizes
+# HKCU and parts of AppData: a Run value written from there is invisible to Windows
+# at sign-in, and a dock started there keeps its settings inside the container.
+# Re-run outside it through a one-shot scheduled task and relay the result.
+if($env:CLAUDECODE -eq '1' -and -not $Outside) {
+    $name='MinimaDock-'+$Action+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)
+    $logFile=Join-Path $PSScriptRoot ($name+'.log')
+    $arguments='-NoProfile -ExecutionPolicy Bypass -File "'+$PSCommandPath+'" -Action '+$Action+' -Outside -Log "'+$logFile+'"'
+    $task=Register-ScheduledTask -TaskName $name -Action (New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $arguments -WorkingDirectory $PSScriptRoot) -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)) -Force
+    try {
+        Start-ScheduledTask -TaskName $name
+        $deadline=(Get-Date).AddMinutes(10)
+        do {Start-Sleep -Milliseconds 500} while((Get-ScheduledTask -TaskName $name).State -eq 'Running' -and (Get-Date) -lt $deadline)
+        $code=(Get-ScheduledTaskInfo -TaskName $name).LastTaskResult
+        if(Test-Path -LiteralPath $logFile) {
+            # The transcript's own header and footer lines start with "*" or "Transcript".
+            Get-Content -LiteralPath $logFile | Where-Object {$_ -notmatch '^\*+$|^Transcript |^Windows PowerShell transcript|^(Start|End) time|^Username|^RunAs User|^Configuration Name|^Machine|^Host Application|^Process ID|^PSVersion|^PSEdition|^PSCompatibleVersions|^BuildVersion|^CLRVersion|^WSManStackVersion|^PSRemotingProtocolVersion|^SerializationVersion|^OS:|^PS>'}
+            Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
+        }
+    } finally {Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue}
+    exit $code
+}
 $root=Join-Path $env:LOCALAPPDATA 'Programs\MinimaDock'
 $versions=Join-Path $root 'versions'
 $recordFile=Join-Path $root 'install.json'
