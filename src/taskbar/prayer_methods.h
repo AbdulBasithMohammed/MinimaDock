@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <concepts>
+#include <initializer_list>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -221,14 +223,86 @@ inline std::optional<PrayerDay> parse_mawaqit(std::string_view page,int month,in
     return d;
 }
 
-// Calculated times (praytimes.org method): ISNA angles (Fajr and Isha 15°),
-// Shafi Asr, sunset Maghrib. `utc_offset` in hours for that date. Iqama is
-// left unset: only the masjid publishes it.
-inline PrayerDay calculate_day(int year,int month,int day,double latitude,double longitude,double utc_offset) {
+// Calculation conventions (praytimes.org / AlAdhan values). Fajr and Isha are
+// the sun's depression in degrees; Umm al-Qura sets Isha a fixed time after
+// Maghrib instead, and Tehran sets Maghrib by angle rather than at sunset.
+enum class CalcMethod {Automatic,MWL,ISNA,Egypt,Makkah,Karachi,Dubai,Singapore,Turkey,Tehran,Count};
+struct CalcParams {
+    double fajr=18,isha=17;
+    int isha_minutes=0;   // >0: Isha this many minutes after Maghrib.
+    double maghrib=0;     // >0: Maghrib at this depression, else at sunset.
+    int asr_factor=1;     // Shadow length: 1 Standard (Shafi, Maliki, Hanbali), 2 Hanafi.
+};
+inline CalcParams calc_params(CalcMethod m,int asr_factor=1) {
+    CalcParams p;p.asr_factor=asr_factor==2?2:1;
+    switch(m) {
+    case CalcMethod::ISNA:p.fajr=15;p.isha=15;break;
+    case CalcMethod::Egypt:p.fajr=19.5;p.isha=17.5;break;
+    case CalcMethod::Makkah:p.fajr=18.5;p.isha_minutes=90;break; // 120 in Ramadan: the caller knows the Hijri month.
+    case CalcMethod::Karachi:p.fajr=18;p.isha=18;break;
+    case CalcMethod::Dubai:p.fajr=18.2;p.isha=18.2;break;
+    case CalcMethod::Singapore:p.fajr=20;p.isha=18;break;
+    case CalcMethod::Turkey:p.fajr=18;p.isha=17;break;
+    case CalcMethod::Tehran:p.fajr=17.7;p.isha=14;p.maghrib=4.5;break;
+    default:break; // Muslim World League: 18 / 17.
+    }
+    return p;
+}
+inline const wchar_t* calc_method_name(CalcMethod m) {
+    switch(m) {
+    case CalcMethod::MWL:return L"Muslim World League";
+    case CalcMethod::ISNA:return L"ISNA";
+    case CalcMethod::Egypt:return L"Egyptian Authority";
+    case CalcMethod::Makkah:return L"Umm al-Qura";
+    case CalcMethod::Karachi:return L"Karachi";
+    case CalcMethod::Dubai:return L"Dubai";
+    case CalcMethod::Singapore:return L"Singapore";
+    case CalcMethod::Turkey:return L"Diyanet";
+    case CalcMethod::Tehran:return L"Tehran";
+    default:return L"Automatic";
+    }
+}
+namespace detail {
+inline std::string country_code(std::string_view country) {
+    std::string c;for(const char ch:country.substr(0,2))c+=static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return c;
+}
+inline bool one_of(const std::string& c,std::initializer_list<const char*> list){for(const auto* x:list)if(c==x)return true;return false;}
+}
+// The convention most used in a country (ISO 3166 alpha-2, any case), as the
+// established libraries choose it; elsewhere the Muslim World League.
+inline CalcMethod auto_method(std::string_view country) {
+    const auto c=detail::country_code(country);
+    if(detail::one_of(c,{"pk","in","bd","af"}))return CalcMethod::Karachi;
+    if(detail::one_of(c,{"us","ca"}))return CalcMethod::ISNA;
+    if(detail::one_of(c,{"eg","sd","ly","sy","iq","lb","jo","ps"}))return CalcMethod::Egypt;
+    if(detail::one_of(c,{"sa","ye"}))return CalcMethod::Makkah;
+    if(c=="ae")return CalcMethod::Dubai;
+    if(detail::one_of(c,{"sg","my","bn","id"}))return CalcMethod::Singapore;
+    if(c=="tr")return CalcMethod::Turkey;
+    if(c=="ir")return CalcMethod::Tehran;
+    return CalcMethod::MWL;
+}
+// Asr shadow factor most used in a country: Hanafi across South Asia and Turkey.
+inline int auto_asr(std::string_view country) {
+    return detail::one_of(detail::country_code(country),{"pk","in","bd","af","tr"})?2:1;
+}
+
+// Calculated times (praytimes.org algorithm) for one date at a place.
+// `to_local` turns an instant, in hours after that date's UTC midnight (it may
+// be negative or past 24), into minutes after local midnight, so each time gets
+// the offset in force at that instant (daylight saving changes mid-day).
+// Above about 48° the sun may not get deep enough for Fajr or Isha: those then
+// follow the angle-based rule (at most angle/60 of the night from sunrise or
+// sunset). Where the sun doesn't rise or set at all, the day is calculated at
+// 65° and `approximate` is set. Iqama is left unset: only the masjid publishes it.
+template<std::invocable<double> ToLocal>
+PrayerDay calculate_day(int year,int month,int day,double latitude,double longitude,const CalcParams& params,ToLocal to_local,bool* approximate=nullptr) {
     constexpr double pi=3.14159265358979323846;
+    const double nan=std::nan("");
     const auto dsin=[&](double d){return std::sin(d*pi/180);};const auto dcos=[&](double d){return std::cos(d*pi/180);};
     const auto dtan=[&](double d){return std::tan(d*pi/180);};const auto darcsin=[&](double x){return std::asin(x)*180/pi;};
-    const auto darccos=[&](double x){return std::acos(std::clamp(x,-1.0,1.0))*180/pi;};const auto darctan2=[&](double y,double x){return std::atan2(y,x)*180/pi;};
+    const auto darctan2=[&](double y,double x){return std::atan2(y,x)*180/pi;};
     const auto darccot=[&](double x){return std::atan(1/x)*180/pi;};
     const auto fix=[](double a,double b){a-=b*std::floor(a/b);return a<0?a+b:a;};
     int y=year,m=month;if(m<=2){y-=1;m+=12;}
@@ -242,18 +316,41 @@ inline PrayerDay calculate_day(int year,int month,int day,double latitude,double
         return {darcsin(dsin(e)*dsin(L)),q/15-RA};
     };
     const auto mid_day=[&](double t){return fix(12-sun(jdate+t).equation,24);};
+    double lat=latitude;
+    // NaN when the sun never reaches that angle today.
     const auto angle_time=[&](double angle,double t,bool before_noon){
         const double decl=sun(jdate+t).declination,noon=mid_day(t);
-        const double T=darccos((-dsin(angle)-dsin(decl)*dsin(latitude))/(dcos(decl)*dcos(latitude)))/15;
+        const double c=(-dsin(angle)-dsin(decl)*dsin(lat))/(dcos(decl)*dcos(lat));
+        if(c<-1||c>1)return nan;
+        const double T=std::acos(c)*180/pi/15;
         return noon+(before_noon?-T:T);
     };
-    const auto asr_time=[&](double factor,double t){const double decl=sun(jdate+t).declination;return angle_time(-darccot(factor+dtan(std::abs(latitude-decl))),t,false);};
-    const double fajr=angle_time(15,5.0/24,true),sunrise=angle_time(0.833,6.0/24,true),dhuhr=mid_day(12.0/24);
-    const double asr=asr_time(1,13.0/24),maghrib=angle_time(0.833,18.0/24,false),isha=angle_time(15,18.0/24,false);
-    const auto minutes=[&](double h){const double local=h+utc_offset-longitude/15;return static_cast<int>(std::lround(fix(local,24)*60))%1440;};
+    const auto asr_time=[&](double factor,double t){const double decl=sun(jdate+t).declination;return angle_time(-darccot(factor+dtan(std::abs(lat-decl))),t,false);};
+    double sunrise=angle_time(0.833,6.0/24,true),sunset=angle_time(0.833,18.0/24,false);
+    const bool polar=std::isnan(sunrise)||std::isnan(sunset);
+    if(polar){lat=std::copysign(65.0,latitude);sunrise=angle_time(0.833,6.0/24,true);sunset=angle_time(0.833,18.0/24,false);}
+    if(approximate)*approximate=polar;
+    const double dhuhr=mid_day(12.0/24);
+    double fajr=angle_time(params.fajr,5.0/24,true),asr=asr_time(params.asr_factor,13.0/24);
+    double maghrib=params.maghrib>0?angle_time(params.maghrib,18.0/24,false):sunset;
+    // Angle-based high-latitude rule: never further from sunrise / sunset than
+    // angle/60 of the night (also covers twilight that lasts all night).
+    const double night=24-(sunset-sunrise);
+    if(const double portion=params.fajr/60*night;std::isnan(fajr)||sunrise-fajr>portion)fajr=sunrise-portion;
+    if(params.maghrib>0)if(const double portion=params.maghrib/60*night;std::isnan(maghrib)||maghrib-sunset>portion)maghrib=sunset+portion;
+    double isha=params.isha_minutes>0?maghrib+params.isha_minutes/60.0:angle_time(params.isha,18.0/24,false);
+    if(params.isha_minutes<=0)if(const double portion=params.isha/60*night;std::isnan(isha)||isha-sunset>portion)isha=sunset+portion;
+    if(std::isnan(asr))asr=dhuhr+(sunset-dhuhr)/2; // Sun too low all day for the shadow rule.
+    const auto minutes=[&](double h){return to_local(h-longitude/15);};
     PrayerDay d;d.year=year;d.month=month;d.day=day;
     const auto set=[&](Salah s,double h){auto& t=d[s];t.begin=t.adhan=minutes(h);};
     set(Salah::Fajr,fajr);d[Salah::Sunrise].begin=minutes(sunrise);set(Salah::Zuhr,dhuhr);set(Salah::Asr,asr);set(Salah::Maghrib,maghrib);set(Salah::Isha,isha);
     return d;
+}
+// The same with one fixed UTC offset (hours) for the whole day.
+inline PrayerDay calculate_day(int year,int month,int day,double latitude,double longitude,const CalcParams& params,double utc_offset,bool* approximate=nullptr) {
+    return calculate_day(year,month,day,latitude,longitude,params,[utc_offset](double utc){
+        const long total=std::lround((utc+utc_offset)*60);return static_cast<int>(((total%1440)+1440)%1440);
+    },approximate);
 }
 }

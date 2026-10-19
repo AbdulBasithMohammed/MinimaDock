@@ -47,7 +47,7 @@ Tap the **Windows key** to search apps, open windows, files and Settings. Do qui
 <td width="50%" valign="top">
 
 ### 🕌 Prayer times built in
-Point it at your masjid's website and the clock shows the next prayer. At each Adhan a small card (even over games) counts down to Iqama with a gentle chime. Works with GalaxyStream, Masjidal / Athan+, Mawaqit and most timetable pages.
+Point it at your masjid's website, or let it calculate times for your city or this PC's location, and the clock shows the next prayer. At each Adhan a small card (even over games) counts down to Iqama with a gentle chime. Works with GalaxyStream, Masjidal / Athan+, Mawaqit and most timetable pages.
 
 </td>
 <td width="50%" valign="top">
@@ -63,7 +63,7 @@ Theme, accent colour, glass tint and strength, icon size, magnification, motion,
 
 <table>
 <tr>
-<td align="center" width="50%"><img src="docs/images/quick-settings.png" alt="Quick settings: Wi-Fi networks"><br><sub><b>Quick settings</b>: Wi-Fi, Bluetooth, volume, timer, updates</sub></td>
+<td align="center" width="50%"><img src="docs/images/quick-settings.png" alt="Quick settings: Wi-Fi networks"><br><sub><b>Quick settings</b>: tiles you choose, volume and brightness</sub></td>
 <td align="center" width="50%"><img src="docs/images/prayer.png" alt="Calendar with prayer times and the Adhan card"><br><sub><b>Calendar and prayers</b>: Adhan and Iqama at a glance</sub></td>
 </tr>
 <tr>
@@ -112,7 +112,7 @@ Double-click **`Uninstall MinimaDock.cmd`**, or go to **Settings > Apps > Instal
 - **Nothing is removed.** Explorer keeps running; MinimaDock only hides its taskbar while it runs.
 - **Always recoverable.** The original taskbar state is saved before anything is hidden and restored on uninstall, sign-out, a crash or even a power cut.
 - **Self-healing.** If the dock crashes it restarts by itself; if it keeps failing, your Windows taskbar comes back automatically.
-- **Private.** Searches stay on your PC. The only internet requests are the prayer-times website you choose (and the widget hosts it names) and a daily update check on GitHub, which you can turn off.
+- **Private.** Searches stay on your PC. The only internet requests are the prayer-times website you choose (and the widget hosts it names), OpenStreetMap's city search when you press Find or Locate me, and a daily update check on GitHub, which you can turn off.
 
 ## ❓ FAQ
 
@@ -125,7 +125,7 @@ No. It installs to <code>%LOCALAPPDATA%\Programs\MinimaDock</code> and adds itse
 <details>
 <summary><b>How do I set up prayer times?</b></summary>
 <br>
-Right-click empty space on the dock > <b>MinimaDock settings</b> > <b>Prayer times</b>, and paste your masjid's website. MinimaDock tries several ways of reading it and checks the times make sense. If the site can't be read it can calculate Adhan times for your location. Until you add a website, no prayer times are shown.
+Right-click empty space on the dock > <b>MinimaDock settings</b> > <b>Prayer times</b>, and choose <b>Masjid website</b> or <b>My location</b>. With a website, MinimaDock tries several ways of reading it and checks the times make sense. With My location, search your city or press <b>Locate me</b>; times are calculated on your PC with the method used in your country, which you can change.
 </details>
 
 <details>

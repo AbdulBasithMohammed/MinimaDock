@@ -1,5 +1,12 @@
 # Initial development delivery
 
+## October 20: prayer times by location and editable Quick settings
+
+- Prayer times: Customize > Prayer times chooses between **Masjid website** and **My location**. My location searches a city (or takes "latitude, longitude"), or follows this PC with Locate me, checked once a day. Nine calculation methods plus Hanafi or Standard Asr are chosen from the country automatically or by hand. Times are calculated per instant, so daylight-saving days are right. The prayer service no longer joins its worker on the GUI thread.
+- Quick settings can be edited in the panel: the pencil (or a right-click) shows remove badges, drag reorders, **+ Add** lists the hidden tiles and **Reset to default** restores the original six. Up to three pages of six, switched by dots, the wheel, a touchpad swipe, a drag or Ctrl+Left/Right.
+- New tiles: Project, Airplane mode, Mobile hotspot, Dark mode, Live captions, Keyboard layout, Cast, Energy saver, VPN, Night light, Nearby sharing, Accessibility, Color filters, Rotation lock (only with a rotation sensor) and Do not disturb, plus a brightness slider on PCs with a built-in screen. See decisions.md for which tiles toggle and which open Settings.
+- Tests: calculation methods, high latitude, daylight-saving days, Nominatim response parsing and the tile layout (`prayer_methods_tests`, `geo_json_tests`, `quick_tiles_tests`). Snapshots: `--snapshot-settings-edit`, `--snapshot-settings-page2`, `--snapshot-settings-add`.
+
 ## October 15: motion, menus, pinning and performance, versions 0.2.51 to 0.2.56
 
 - The prayer card uses the dock's glass (blurred backdrop, tint, sheen, rim light, soft shadow) and its outline moon; it shrinks to a centred countdown pill with fixed-width digits.
@@ -41,7 +48,7 @@ The MinimaDock button opens a 680×520 glass launcher, designed in a rendered pr
 ## October 13–14: quick settings, prayer times and hover motion
 
 - Quick settings has six tiles chosen by the user: Wi-Fi and Bluetooth (toggle plus a › page listing networks/devices with connect and password entry, as in Windows), microphone mute, NVIDIA Instant Capture (Alt+F10), a timer with an alarm, and Windows Update status. Radios use Windows.Devices.Radios; networks use the WLAN API; Bluetooth audio devices connect through their audio endpoint. Tiles, pages and lists animate (press, highlight fade, animated Lucide icons, page slides, list cascade, switch knob spring, volume waves).
-- Prayer times are read from the user's masjid website (Islamic Society of Toronto by default, cached locally). The clock's second line shows the next prayer, the calendar adds a daily Adhan/Iqama table, and a chime plus reminder card marks each Adhan. No Adhan audio is played.
+- Prayer times are read from the user's masjid website, or calculated locally for a city or this PC's location (cached locally). The clock's second line shows the next prayer, the calendar adds a daily Adhan/Iqama table, and a chime plus reminder card marks each Adhan. No Adhan audio is played.
 - Both side wings widened equally so the short date ("14 Oct 26") fits.
 - Hovering an app lifts and enlarges it with a spring (stiffness 320, damping 17), moves only its direct neighbours aside and shows its name after 150 ms; wing controls use the same springs.
 - Right-click on an app shows a Windows-style Jump List with that app's own tasks and recent/pinned items, following the system light or dark theme. Shift+right-click opens the window menu. File Explorer's entry always opens a new window. Clicking an inactive app activates its most recent window; clicking the active app minimizes a single window or shows previews for several.

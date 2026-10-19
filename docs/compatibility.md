@@ -35,6 +35,6 @@ Managed policy assessment is deliberately unresolved. Capturing registry values 
 
 ## Prayer websites and the bar (0.2.58)
 
-Read correctly: GalaxyStream widgets, Masjidal / Athan+ embedded widgets (e.g. ISBCC), Mawaqit pages (e.g. Paris), day tables and text listings (Masjid Manhattan, MCC East Bay). Declined: month-long timetables (East London Mosque), which fall back to calculated times. Pages that build their times entirely in JavaScript from private APIs cannot be read.
+Read correctly: GalaxyStream widgets, Masjidal / Athan+ embedded widgets, Mawaqit pages, day tables and text listings. Declined: month-long timetables, which fall back to calculated times. Pages that build their times entirely in JavaScript from private APIs cannot be read.
 
 The bar's work-area reservation applies to the primary monitor only.

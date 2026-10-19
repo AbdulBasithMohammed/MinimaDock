@@ -42,7 +42,7 @@ inline int parse_clock(std::string_view text) {
     if(pm&&hour<12)hour+=12;else if(am&&hour==12)hour=0;
     return hour*60+minute;
 }
-// GalaxyStream's PrayerTimesJS widget (used by the Islamic Society of Toronto):
+// GalaxyStream's PrayerTimesJS widget (used by many masjid sites):
 // beginTime[i] / adhanTime[i] / iqamaTime[i] arrays for today, where i is
 // Fajr, Sunrise, Zawal, Zuhr, Asr, Maghrib, Isha, Jumah 1-3.
 inline std::optional<PrayerDay> parse_galaxystream(std::string_view script) {

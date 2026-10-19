@@ -19,6 +19,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     if (count == 3 && wcscmp(args[1], L"--snapshot") == 0) result = minima::save_preview_snapshot(args[2], true);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-collapsed") == 0) result = minima::save_preview_snapshot(args[2], false);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-settings") == 0) result = minima::save_preview_snapshot(args[2], true,1);
+    else if (count == 3 && wcscmp(args[1], L"--snapshot-settings-edit") == 0) result = minima::save_preview_snapshot(args[2], true,26);
+    else if (count == 3 && wcscmp(args[1], L"--snapshot-settings-page2") == 0) result = minima::save_preview_snapshot(args[2], true,27);
+    else if (count == 3 && wcscmp(args[1], L"--snapshot-settings-add") == 0) result = minima::save_preview_snapshot(args[2], true,28);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-tray") == 0) result = minima::save_preview_snapshot(args[2], true,2);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-dock") == 0) result = minima::save_preview_snapshot(args[2], true,3);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-desktop-hover") == 0) result = minima::save_preview_snapshot(args[2], true,4);
@@ -38,7 +41,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     else if (count == 3 && wcscmp(args[1], L"--snapshot-media-paused") == 0) result = minima::save_preview_snapshot(args[2], true,13);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-calendar") == 0) result = minima::save_calendar_snapshot(args[2]);
     else if (count == 3 && wcscmp(args[1], L"--snapshot-calendar-prayers") == 0) {
-        minima::PrayerView view;view.visible=true;view.status=L"Updated 9:02 AM";view.website=L"https://www.islamicsocietyoftoronto.com/";
+        minima::PrayerView view;view.visible=true;view.status=L"Updated 9:02 AM";view.website=L"https://your-masjid.org";
         view.rows={{L"Fajr",L"6:25 AM",L"6:40 AM",0},{L"Sunrise",L"7:32 AM",L"\x2014",0},{L"Zuhr",L"1:30 PM",L"1:45 PM",0},{L"Asr",L"5:00 PM",L"5:10 PM",1},{L"Maghrib",L"6:37 PM",L"6:40 PM",2},{L"Isha",L"8:30 PM",L"8:45 PM",2}};
         result = minima::save_calendar_snapshot(args[2], false, &view);
     }

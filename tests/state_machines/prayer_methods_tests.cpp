@@ -57,12 +57,48 @@ int main(int argc,char** argv) {
         // Sanity rules.
         PrayerDay bad=*d;bad[Salah::Asr].adhan=at(12,0);expect(!sensible(bad),"Out-of-order prayers are rejected");
         bad=*d;bad[Salah::Isha].iqama=at(19,0);expect(!sensible(bad),"Iqama before Adhan is rejected");
-        // Calculation (Toronto, 2026-10-15, UTC-4): sunrise, noon and sunset are method-independent.
-        const auto c=calculate_day(2026,10,15,43.6532,-79.3832,-4);
-        // The Islamic Society of Toronto publishes sunrise 7:33 and Maghrib 6:35 PM that day.
-        expect(std::abs(c[Salah::Sunrise].begin-at(7,33))<=2&&std::abs(c[Salah::Maghrib].adhan-at(18,35))<=2&&std::abs(c[Salah::Zuhr].adhan-at(13,3))<=2,"Calculated sunrise, noon and sunset");
-        expect(sensible(c)&&c[Salah::Fajr].iqama<0,"Calculated day is sensible and has no Iqama");
-        std::cout<<"Prayer methods passed: rows (begins/adhan/iqama), bare 12-hour times, columns, Mawaqit offsets, sanity rules, calculated times.\n";
+        // Calculation, on synthetic coordinates. Reference times come from the
+        // AlAdhan API (an independent implementation) for the same inputs.
+        const auto near=[](const PrayerDay& d,std::initializer_list<int> want,const char* message) {
+            const Salah order[]={Salah::Fajr,Salah::Sunrise,Salah::Zuhr,Salah::Asr,Salah::Maghrib,Salah::Isha};
+            size_t i=0;
+            for(const int w:want) {
+                const auto& t=d[order[i]];const int got=order[i]==Salah::Sunrise?t.begin:t.adhan;++i;
+                int diff=std::abs(got-w);diff=std::min(diff,1440-diff);
+                if(diff>2){show("calculated",d);throw std::runtime_error(message);}
+            }
+        };
+        const auto k=calculate_day(2026,10,15,30,70,calc_params(CalcMethod::Karachi,2),5.0);
+        near(k,{at(5,2),at(6,22),at(12,6),at(16,11),at(17,50),at(19,9)},"Karachi angles with Hanafi Asr");
+        expect(sensible(k)&&k[Salah::Fajr].iqama<0,"Calculated day is sensible and has no Iqama");
+        near(calculate_day(2026,10,15,40,-75,calc_params(CalcMethod::ISNA),-4.0),{at(5,56),at(7,11),at(12,46),at(15,52),at(18,20),at(19,35)},"ISNA with Standard Asr");
+        const auto q=calculate_day(2026,10,15,25,45,calc_params(CalcMethod::Makkah),3.0);
+        near(q,{at(4,40),at(5,58),at(11,46),at(15,6),at(17,33),at(19,3)},"Umm al-Qura: Isha 90 minutes after Maghrib");
+        auto ramadan=calc_params(CalcMethod::Makkah);ramadan.isha_minutes=120;
+        expect(calculate_day(2026,10,15,25,45,ramadan,3.0)[Salah::Isha].adhan==q[Salah::Maghrib].adhan+120,"Umm al-Qura: 120 minutes in Ramadan");
+        near(calculate_day(2026,10,15,35,50,calc_params(CalcMethod::Tehran),3.0),{at(4,23),at(5,46),at(11,26),at(14,39),at(17,23),at(18,10)},"Tehran: Maghrib by angle");
+        // High latitude in June: twilight all night, so Fajr and Isha follow the angle-based rule.
+        bool approximate=true;
+        near(calculate_day(2026,6,21,60,10,calc_params(CalcMethod::MWL),2.0,&approximate),{at(2,23),at(3,56),at(13,22),at(18,4),at(22,48),at(0,15)},"Angle-based rule at high latitude");
+        expect(!approximate,"Sun rises and sets at 60 degrees");
+        // Polar day and night: no sunrise or sunset, calculated at 65 degrees, never NaN.
+        for(const int month:{6,12}) for(const double latitude:{70.0,-70.0,89.9}) {
+            const auto p=calculate_day(2026,month,21,latitude,10,calc_params(CalcMethod::MWL),1.0,&approximate);
+            expect(approximate,"Polar days are approximate");
+            for(const auto& t:p.times)expect(t.begin>=-1&&t.begin<1440&&t.adhan>=-1&&t.adhan<1440,"Polar times stay on the clock");
+            expect(p.valid(),"Polar day still has all five prayers");
+        }
+        // Daylight saving: each instant gets the offset in force at that moment.
+        const auto shifted=calculate_day(2026,10,15,30,70,calc_params(CalcMethod::Karachi,2),[](double utc){
+            const double offset=utc<6?5:4; // The clocks go back at 06:00 UTC.
+            return static_cast<int>(std::lround((utc+offset)*60));
+        });
+        expect(shifted[Salah::Fajr].adhan==k[Salah::Fajr].adhan&&shifted[Salah::Maghrib].adhan==k[Salah::Maghrib].adhan-60,"Offset applied per instant");
+        // Automatic method and Asr by country.
+        expect(auto_method("PK")==CalcMethod::Karachi&&auto_method("us")==CalcMethod::ISNA&&auto_method("sa")==CalcMethod::Makkah&&auto_method("ir")==CalcMethod::Tehran,"Method by country");
+        expect(auto_method("")==CalcMethod::MWL&&auto_method("zz")==CalcMethod::MWL&&auto_method("x")==CalcMethod::MWL,"Unknown country: Muslim World League");
+        expect(auto_asr("in")==2&&auto_asr("TR")==2&&auto_asr("eg")==1&&auto_asr("")==1,"Asr by country");
+        std::cout<<"Prayer methods passed: rows (begins/adhan/iqama), bare 12-hour times, columns, Mawaqit offsets, sanity rules, calculation methods, high latitude, polar days, daylight saving, method by country.\n";
         return 0;
     } catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

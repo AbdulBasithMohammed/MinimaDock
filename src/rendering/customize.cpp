@@ -3,16 +3,19 @@
 #include "rendering/glass_style.h"
 #include "platform/com_ptr.h"
 #include "taskbar/prayer_methods.h"
+#include "windows/geolocation.h"
 #include <d2d1_1.h>
 #include <dwrite.h>
 #include <wincodec.h>
 #include <commdlg.h>
 #include <mmsystem.h>
+#include <shellapi.h>
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -28,7 +31,7 @@ const wchar_t* page_lede(Page p) {
     switch(p) {
     case Page::Look:return L"The look of the dock, its flyouts, menus and the prayer card.";
     case Page::Dock:return L"Style, behavior, size and what the dock shows.";
-    case Page::Prayer:return L"Read from your masjid's website and kept on this PC.";
+    case Page::Prayer:return L"From your masjid's website, or calculated for your location on this PC.";
     case Page::Launch:return L"The search that opens from the MinimaDock button.";
     default:return L"";
     }
@@ -38,6 +41,9 @@ std::wstring clock_text(int minutes,bool marker=true) {
     SYSTEMTIME t{};t.wHour=static_cast<WORD>((minutes/60)%24);t.wMinute=static_cast<WORD>(minutes%60);
     wchar_t text[32]{};GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT,TIME_NOSECONDS|(marker?0:TIME_NOTIMEMARKER),&t,nullptr,text,32);return text;
 }
+// A finished city search, posted from its thread to the window.
+constexpr UINT search_message=WM_APP+1;
+struct SearchResult {int generation=0;PlaceLookup lookup;};
 const wchar_t* chime_file(int chime){return chime==1?L"\\Media\\Windows Notify Messaging.wav":L"\\Media\\Windows Notify Calendar.wav";}
 }
 
@@ -49,8 +55,10 @@ struct CustomizeWindow::Impl {
     Page page=Page::Look;float scroll=0,scroll_target=0,content_height=0;
     std::int64_t page_changed=-1,opened=-1;
     float px=-1,py=-1;bool slider_drag=false,mouse_down=false;
-    // Text fields: 0 none, 1 website, 2 location.
+    // Text fields: 0 none, 1 website, 2 city search.
     int editing=0;std::wstring edit_text;bool select_all=false;std::int64_t caret_start=0;
+    // City search: the text, its results (or why there are none) and the newest request.
+    std::wstring search_text;std::vector<Place> found;std::wstring search_note;bool searching=false;int search_generation=0;
     // ---- Drawing ----
     UINT dpi=96;UINT pixel_width=0,pixel_height=0;
     ComPtr<ID2D1Factory> factory;ComPtr<IDWriteFactory> write;
@@ -360,49 +368,78 @@ struct CustomizeWindow::Impl {
         });
         return y;
     }
+    // Height of a chips row that wraps like chips() does across a group `width` wide.
+    float chip_height(const std::vector<std::wstring>& labels,float width,int marked=-1) {
+        float x=0,extra=0;const float right=width-32;
+        for(size_t i=0;i<labels.size();++i) {
+            const float w=measure((static_cast<int>(i)==marked?L"'13 ":L"")+labels[i],f_button.get())+22;
+            if(x+w>right){x=0;extra+=34;}
+            x+=w+8;
+        }
+        return chip_row_height+extra;
+    }
+    // City search: "latitude, longitude" is used as typed; anything else goes to
+    // Nominatim on a one-shot thread (only on Enter or Find, never per keystroke).
+    void run_search(std::wstring query) {
+        while(!query.empty()&&query.back()==L' ')query.pop_back();while(!query.empty()&&query.front()==L' ')query.erase(query.begin());
+        search_text=query;found.clear();search_note.clear();
+        if(query.empty()){redraw();return;}
+        if(const auto c=parse_coordinates(query)) {
+            prayer.locate=LocateMode::City;prayer.latitude=c->latitude;prayer.longitude=c->longitude;prayer.place.clear();prayer.country.clear();prayer.located=true;
+            search_text.clear();changed_prayer(false);return;
+        }
+        if(!hwnd)return;
+        searching=true;const int generation=++search_generation;const HWND window=hwnd;
+        std::thread([window,generation,query]{
+            auto* result=new SearchResult{generation,search_places(query)};
+            if(!PostMessageW(window,search_message,0,reinterpret_cast<LPARAM>(result)))delete result;
+        }).detach();
+        redraw();
+    }
+    void search_done(std::unique_ptr<SearchResult> result) {
+        if(result->generation!=search_generation)return; // A newer search is running.
+        searching=false;found=std::move(result->lookup.places);
+        switch(result->lookup.error) {
+        case PlaceError::Offline:search_note=L"You're offline.";break;
+        case PlaceError::Busy:search_note=L"City search is busy \x2014 try again in a minute.";break;
+        case PlaceError::Failed:search_note=L"Couldn't search right now.";break;
+        default:search_note=found.empty()?L"No places found.":L"";break;
+        }
+        redraw();
+    }
+    void pick_place(const Place& p) {
+        prayer.locate=LocateMode::City;prayer.latitude=p.latitude;prayer.longitude=p.longitude;prayer.place=p.label();prayer.country=p.country_code;prayer.located=true;
+        found.clear();search_note.clear();search_text.clear();changed_prayer(false);
+    }
+    // Today's six times under a status line (Sunrise has no Iqama).
+    Row times_row(const std::wstring& status,const PrayerSnapshot& snap) {
+        return {status,L"",row_height+(snap.have?64.0f:0)-14,[this,snap](float,float,float l,float top){
+            if(snap.have) {
+                SYSTEMTIME now_time{};GetLocalTime(&now_time);const bool friday=now_time.wDayOfWeek==5;
+                const auto order=daily_salah(snap.day,friday);
+                const Salah cells[]={order[0],Salah::Sunrise,order[1],order[2],order[3],order[4]};
+                const float w=(right_edge-l-16-5*6)/6;
+                for(int i=0;i<6;++i) {
+                    const auto& time=snap.day[cells[i]];const float x=l+static_cast<float>(i)*(w+6);
+                    const auto box=D2D1::RectF(x,top+42,x+w,top+42+48);fill(box,pal.field,8);
+                    text(salah_name(cells[i]),D2D1::RectF(x+8,box.top+3,box.right-4,box.top+18),f_small.get(),pal.ink_secondary);
+                    text(clock_text(cells[i]==Salah::Sunrise?time.begin:time.adhan),D2D1::RectF(x+8,box.top+16,box.right-4,box.top+32),f_button.get(),pal.ink);
+                    text(cells[i]==Salah::Sunrise||time.iqama<0?std::wstring(L"\x2014"):L"Iqama "+clock_text(time.iqama,false),D2D1::RectF(x+8,box.top+31,box.right-4,box.bottom-2),f_small.get(),pal.ink_secondary);
+                }
+            }
+            return right_edge;
+        }};
+    }
     float prayer_page(float left,float right,float y) {
         const auto snap=hooks.prayer_status?hooks.prayer_status():PrayerSnapshot{};
-        std::wstring status;
-        if(prayer.website.empty())status=L"Add your masjid's website to show its prayer times.";
-        else if(snap.method.rfind(L"Calculated",0)==0)status=L"Couldn't read the website ("+(snap.error.empty()?std::wstring(L"no times found"):snap.error)+L"). Showing calculated Adhan times.";
-        else if(!snap.error.empty())status=L"Couldn't read today's times: "+snap.error+(snap.have?L". Showing the last times found.":L".");
-        else if(snap.have)status=L"Found today's times"+(snap.method.empty()?std::wstring():L" with "+snap.method)+L". Updated "+snap.updated+L".";
-        else status=L"Checking the website\x2026";
-        const float grid_h=snap.have?64.0f:0;
+        const bool by_location=prayer.source==PrayerSource::Location;
         y=group(left,right,y,{
-            {L"Masjid website",L"",row_height,[this](float r,float cy,float,float){
-                const float b=button(r,cy,L"Check now",[this]{commit_edit();if(hooks.check_prayers)hooks.check_prayers();});
-                return field(b-8,cy,300,1,prayer.website,L"https://your-masjid.org");
-            }},
-            {status,L"",row_height+grid_h-14,[this,snap](float,float cy,float l,float top){
-                (void)cy;
-                if(snap.have) {
-                    SYSTEMTIME now_time{};GetLocalTime(&now_time);const bool friday=now_time.wDayOfWeek==5;
-                    const auto order=daily_salah(snap.day,friday);
-                    const Salah cells[]={order[0],Salah::Sunrise,order[1],order[2],order[3],order[4]};
-                    const float w=(right_edge-l-16-5*6)/6;
-                    for(int i=0;i<6;++i) {
-                        const auto& time=snap.day[cells[i]];const float x=l+static_cast<float>(i)*(w+6);
-                        const auto box=D2D1::RectF(x,top+42,x+w,top+42+48);fill(box,pal.field,8);
-                        text(salah_name(cells[i]),D2D1::RectF(x+8,box.top+3,box.right-4,box.top+18),f_small.get(),pal.ink_secondary);
-                        text(clock_text(cells[i]==Salah::Sunrise?time.begin:time.adhan),D2D1::RectF(x+8,box.top+16,box.right-4,box.top+32),f_button.get(),pal.ink);
-                        text(cells[i]==Salah::Sunrise||time.iqama<0?std::wstring(L"\x2014"):L"Iqama "+clock_text(time.iqama,false),D2D1::RectF(x+8,box.top+31,box.right-4,box.bottom-2),f_small.get(),pal.ink_secondary);
-                    }
-                }
-                return right_edge;
-            }},
+            {L"Times from",by_location?L"Calculated on this PC. Iqama times need the website.":L"Your masjid's own Adhan and Iqama times.",row_height,[this](float r,float cy,float,float){
+                return segmented(r,cy,{L"Masjid website",L"My location"},prayer.source==PrayerSource::Location?1:0,[this](int i){
+                    const auto source=i==1?PrayerSource::Location:PrayerSource::Website;if(source==prayer.source)return;
+                    commit_edit();prayer.source=source;changed_prayer(false);});}},
         });
-        // How times are read.
-        std::vector<std::wstring> methods;
-        for(int m=0;m<static_cast<int>(PrayerMethod::Count);++m)methods.push_back(prayer_method_name(static_cast<PrayerMethod>(m)));
-        int marked=-1;for(size_t i=1;i<methods.size();++i)if(snap.method==methods[i])marked=static_cast<int>(i);
-        y=group(left,right,y,{
-            {L"How times are read",L"Automatic tries each method until one gives a complete, sensible day.",chip_row_height+34,[this,methods,marked](float,float,float l,float top){
-                chips(l,right_edge-16,top+48,methods,prayer.method,[this](int i){prayer.method=i;changed_prayer(true);},marked);return right_edge;}},
-            {L"Calculate if the website fails",L"Adhan times from your location (ISNA method). Iqama needs the website.",row_height,[this](float r,float cy,float,float){return toggle(r,cy,prayer.calculate,[this](bool v){prayer.calculate=v;changed_prayer(false);});}},
-            {L"Location",L"Latitude, longitude for calculated times.",row_height,[this](float r,float cy,float,float){wchar_t place[64]{};swprintf(place,64,L"%.4f, %.4f",prayer.latitude,prayer.longitude);return field(r,cy,190,2,place,L"43.6532, -79.3832");}},
-            {L"When times are checked",L"When the day starts and every 3 hours; every 15 minutes while the site is down.",row_height,nullptr},
-        });
+        y=by_location?location_groups(left,right,y,snap):website_groups(left,right,y,snap);
         y=group(left,right,y,{
             {L"Next prayer on the clock",L"\x201C" L"Asr in 15 min\x201D replaces the date as it gets close.",row_height,[this](float r,float cy,float,float){return toggle(r,cy,prayer.clock,[this](bool v){prayer.clock=v;changed_prayer(false);});}},
             {L"Adhan card",L"A small card at the top of the screen, also over games, counting down to Iqama.",row_height,[this](float r,float cy,float,float){return toggle(r,cy,prayer.reminders,[this](bool v){prayer.reminders=v;changed_prayer(false);});}},
@@ -411,6 +448,78 @@ struct CustomizeWindow::Impl {
             {L"Sunrise reminder",L"15 minutes before Fajr time ends.",row_height,[this](float r,float cy,float,float){return toggle(r,cy,prayer.sunrise,[this](bool v){prayer.sunrise=v;changed_prayer(false);});}},
         });
         return y;
+    }
+    float website_groups(float left,float right,float y,const PrayerSnapshot& snap) {
+        std::wstring status;
+        if(prayer.website.empty())status=L"Add your masjid's website to show its prayer times.";
+        else if(snap.method.rfind(L"Calculated",0)==0)status=L"Couldn't read the website ("+(snap.error.empty()?std::wstring(L"no times found"):snap.error)+L"). Showing calculated Adhan times.";
+        else if(!snap.error.empty())status=L"Couldn't read today's times: "+snap.error+(snap.have?L". Showing the last times found.":L".");
+        else if(snap.have)status=L"Found today's times"+(snap.method.empty()?std::wstring():L" with "+snap.method)+L". Updated "+snap.updated+L".";
+        else status=L"Checking the website\x2026";
+        y=group(left,right,y,{
+            {L"Masjid website",L"",row_height,[this](float r,float cy,float,float){
+                const float b=button(r,cy,L"Check now",[this]{commit_edit();if(hooks.check_prayers)hooks.check_prayers();});
+                return field(b-8,cy,300,1,prayer.website,L"https://your-masjid.org");
+            }},
+            times_row(status,snap),
+        });
+        // How times are read.
+        std::vector<std::wstring> methods;
+        for(int m=0;m<static_cast<int>(PrayerMethod::Count);++m)methods.push_back(prayer_method_name(static_cast<PrayerMethod>(m)));
+        int marked=-1;for(size_t i=1;i<methods.size();++i)if(snap.method==methods[i])marked=static_cast<int>(i);
+        return group(left,right,y,{
+            {L"How times are read",L"Automatic tries each method until one gives a complete, sensible day.",chip_height(methods,right-left,marked),[this,methods,marked](float,float,float l,float top){
+                chips(l,right_edge-16,top+48,methods,prayer.method,[this](int i){prayer.method=i;changed_prayer(true);},marked);return right_edge;}},
+            {L"Calculate if the website fails",prayer.located?L"Adhan times for your location, set under My location.":L"Set a location under My location first.",row_height,[this](float r,float cy,float,float){return toggle(r,cy,prayer.calculate,[this](bool v){prayer.calculate=v;changed_prayer(false);});}},
+            {L"When times are checked",L"When the day starts and every 3 hours; every 15 minutes while the site is down.",row_height,nullptr},
+        });
+    }
+    float location_groups(float left,float right,float y,const PrayerSnapshot& snap) {
+        const bool device=prayer.locate==LocateMode::Device;
+        // Where the times are for.
+        std::wstring where;
+        if(device)where=L"Following this PC's location, checked once a day"+(prayer.place.empty()?std::wstring():L" \x00B7 "+prayer.place);
+        else if(prayer.located)where=prayer.place.empty()?std::wstring(L"Custom coordinates"):prayer.place;
+        else where=L"Search a city, type \x201Clatitude, longitude\x201D or use Locate me.";
+        const bool blocked=snap.note.rfind(L"Location is off",0)==0;
+        std::vector<Row> rows;
+        rows.push_back({L"Location",where,row_height,[this,device](float r,float cy,float,float){
+            return button(r,cy,L"Locate me",[this]{
+                commit_edit();found.clear();search_note.clear();
+                prayer.locate=LocateMode::Device;prayer.located_day=0; // Ask Windows now, even if it already answered today.
+                changed_prayer(false);},device);
+        }});
+        rows.push_back({L"City",L"Or type \x201C" L"latitude, longitude\x201D" L".",row_height,[this](float r,float cy,float,float){
+            const float b=button(r,cy,searching?L"Finding\x2026":L"Find",[this]{if(!searching){commit_edit();run_search(search_text);}});
+            return field(b-8,cy,240,2,search_text,L"Search a city");
+        }});
+        if(blocked)rows.push_back({snap.note,L"Turn on location access in Windows, then press Locate me.",row_height,[this](float r,float cy,float,float){
+            return button(r,cy,L"Open settings",[]{ShellExecuteW(nullptr,L"open",L"ms-settings:privacy-location",nullptr,nullptr,SW_SHOWNORMAL);});}});
+        if(!found.empty()) {
+            std::vector<std::wstring> labels;for(const auto& p:found)labels.push_back(p.label());
+            rows.push_back({L"Pick your city",L"",chip_height(labels,right-left),[this,labels](float,float,float l,float top){
+                chips(l,right_edge-16,top+48,labels,-1,[this](int i){pick_place(found[static_cast<size_t>(i)]);});return right_edge;}});
+        } else if(!search_note.empty())rows.push_back({search_note,L"",row_height,nullptr});
+        std::wstring status;
+        if(snap.have)status=L"Today's times \x00B7 "+snap.method.substr(snap.method.rfind(L"Calculated \x00B7 ",0)==0?13:0)+(snap.note.empty()||blocked?L"":L" \x00B7 "+snap.note);
+        else if(!prayer.located)status=L"Set your location to see today's times.";
+        else if(!snap.error.empty())status=snap.error;
+        else status=L"Working out today's times\x2026";
+        rows.push_back(times_row(status,snap));
+        y=group(left,right,y,rows);
+        // How they are calculated.
+        std::vector<std::wstring> methods;
+        const auto automatic=prayer.country.empty()?CalcMethod::Count:auto_method(prayer.country);
+        methods.push_back(automatic==CalcMethod::Count?std::wstring(L"Automatic"):std::wstring(L"Automatic (")+calc_method_name(automatic)+L")");
+        for(int m=1;m<static_cast<int>(CalcMethod::Count);++m)methods.push_back(calc_method_name(static_cast<CalcMethod>(m)));
+        const int asr_auto=prayer.country.empty()?0:auto_asr(prayer.country);
+        return group(left,right,y,{
+            {L"Calculation",L"Automatic uses the convention most followed in your country.",chip_height(methods,right-left),[this,methods](float,float,float l,float top){
+                chips(l,right_edge-16,top+48,methods,prayer.calc_method,[this](int i){prayer.calc_method=i;changed_prayer(false);});return right_edge;}},
+            {L"Asr",asr_auto==2?L"Automatic is Hanafi here (later Asr).":asr_auto==1?L"Automatic is Standard here (Shafi, Maliki, Hanbali).":L"Standard: Shafi, Maliki, Hanbali. Hanafi: later Asr.",row_height,[this](float r,float cy,float,float){
+                return segmented(r,cy,{L"Automatic",L"Standard",L"Hanafi"},std::clamp(prayer.asr,0,2),[this](int i){prayer.asr=i;changed_prayer(false);});}},
+            {L"City search \x00A9 OpenStreetMap contributors",L"Only what you search is sent (Nominatim). A chosen city needs no network after that.",row_height,nullptr},
+        });
     }
     float launch_page(float left,float right,float y) {
         std::vector<Row> rows;
@@ -580,16 +689,13 @@ struct CustomizeWindow::Impl {
             auto value=edit_text;while(!value.empty()&&value.back()==L' ')value.pop_back();while(!value.empty()&&value.front()==L' ')value.erase(value.begin());
             if(!value.empty()&&value.find(L"://")==std::wstring::npos)value=L"https://"+value;
             if(!value.empty()&&value!=prayer.website){prayer.website=value;changed_prayer(true);}
-        } else if(id==2) {
-            double latitude=0,longitude=0;
-            if(swscanf(edit_text.c_str(),L"%lf , %lf",&latitude,&longitude)==2&&std::abs(latitude)<=90&&std::abs(longitude)<=180){prayer.latitude=latitude;prayer.longitude=longitude;changed_prayer(false);}
-        }
+        } else if(id==2)search_text=edit_text; // Searched only on Enter or Find.
         redraw();
     }
     void key_char(wchar_t c) {
         if(!editing)return;
         if(c==8){if(select_all)edit_text.clear();else if(!edit_text.empty())edit_text.pop_back();select_all=false;}
-        else if(c==13){commit_edit();return;}
+        else if(c==13){const bool search=editing==2;commit_edit();if(search)run_search(search_text);return;}
         else if(c==27){editing=0;KillTimer(hwnd,1);}
         else if(c==1){select_all=true;}                 // Ctrl+A
         else if(c==22){if(select_all)edit_text.clear();select_all=false;paste();} // Ctrl+V
@@ -661,11 +767,16 @@ struct CustomizeWindow::Impl {
                 index=(index+((GetKeyState(VK_SHIFT)&0x8000)?count-1:1))%count;self->switch_page(pages[index]);return 0;
             }
             return 0;
+        case search_message:self->search_done(std::unique_ptr<SearchResult>(reinterpret_cast<SearchResult*>(l)));return 0;
         case WM_TIMER:if(w==1||w==2)self->redraw();return 0;
         case WM_ACTIVATE:if(LOWORD(w)==WA_INACTIVE)self->commit_edit();return 0;
         case WM_CLOSE:self->commit_edit();DestroyWindow(window);return 0;
         case WM_DPICHANGED:{self->dpi=HIWORD(w);const auto* r=reinterpret_cast<const RECT*>(l);self->size_to_dpi();SetWindowPos(window,nullptr,r->left,r->top,static_cast<int>(self->pixel_width),static_cast<int>(self->pixel_height),SWP_NOZORDER|SWP_NOACTIVATE);self->hwnd_target.reset();self->redraw();return 0;}
-        case WM_NCDESTROY:SetWindowLongPtrW(window,GWLP_USERDATA,0);self->host.detach();self->hwnd=nullptr;self->hwnd_target.reset();self->brush.reset();self->painter_bound=false;break;
+        case WM_NCDESTROY: {
+            MSG pending{};while(PeekMessageW(&pending,window,search_message,search_message,PM_REMOVE))delete reinterpret_cast<SearchResult*>(pending.lParam);
+            self->searching=false;++self->search_generation;
+            SetWindowLongPtrW(window,GWLP_USERDATA,0);self->host.detach();self->hwnd=nullptr;self->hwnd_target.reset();self->brush.reset();self->painter_bound=false;break;
+        }
         default:break;
         }
         return DefWindowProcW(window,message,w,l);
@@ -709,6 +820,11 @@ void CustomizeWindow::open(HWND owner,const DockSettings& dock,const PrayerSetti
 void CustomizeWindow::close(){if(impl_->hwnd)DestroyWindow(impl_->hwnd);}
 bool CustomizeWindow::visible() const{return impl_->hwnd!=nullptr;}
 void CustomizeWindow::prayer_updated(){impl_->redraw();}
+void CustomizeWindow::prayer_location(const PrayerSettings& p) {
+    auto& i=*impl_;
+    i.prayer.located=p.located;i.prayer.latitude=p.latitude;i.prayer.longitude=p.longitude;i.prayer.place=p.place;i.prayer.country=p.country;i.prayer.located_day=p.located_day;
+    i.redraw();
+}
 void CustomizeWindow::refresh(const DockSettings& dock,const PrayerSettings& prayer,bool reduced) {
     auto& i=*impl_;if(!i.hwnd)return;
     i.dock=dock;i.prayer=prayer;i.reduced=reduced;i.pal=dock_palette(dock);i.live=dock_transparency(dock);i.redraw();
@@ -720,13 +836,17 @@ int save_customize_snapshot(const std::wstring& path,int page) {
     ComPtr<IWICImagingFactory> wic;
     if(FAILED(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(wic.put()))))return 1;
     ui.dock=load_dock_settings();ui.prayer=PrayerSettings{};ui.pal=dock_palette(ui.dock);ui.live=false;ui.reduced=true;ui.composed=false;
+    const bool by_location=page==5; // Prayer times calculated for a made-up place.
+    if(by_location){ui.prayer.source=PrayerSource::Location;ui.prayer.located=true;ui.prayer.latitude=30;ui.prayer.longitude=70;ui.prayer.place=L"Sample Town, Sample Region";ui.prayer.country="eg";page=2;}
+    else {ui.prayer.source=PrayerSource::Website;ui.prayer.website=L"https://your-masjid.org";}
     ui.page=pages[std::clamp(page,0,4)];ui.hooks.version=app_version;
     ui.hooks.windows_key=[]{return true;};ui.hooks.return_to_windows=[]{};ui.hooks.start_with_windows=[]{return true;};
-    ui.hooks.prayer_status=[]{
-        PrayerSnapshot s;s.have=true;s.updated=L"9:02 AM";s.method=L"GalaxyStream widget";
+    ui.hooks.prayer_status=[by_location]{
+        PrayerSnapshot s;s.have=true;s.updated=L"9:02 AM";
+        s.method=by_location?std::wstring(L"Calculated \x00B7 ")+calc_method_name(CalcMethod::Egypt)+L" \x00B7 Standard":std::wstring(L"GalaxyStream widget");
         const int t[][3]={{385,385,400},{452,452,-1},{810,810,825},{1020,1020,1030},{1117,1117,1120},{1230,1230,1245}};
         const Salah order[]={Salah::Fajr,Salah::Sunrise,Salah::Zuhr,Salah::Asr,Salah::Maghrib,Salah::Isha};
-        for(int i=0;i<6;++i)s.day.times[static_cast<size_t>(order[i])]={t[i][0],t[i][1],t[i][2]};
+        for(int i=0;i<6;++i)s.day.times[static_cast<size_t>(order[i])]={t[i][0],t[i][1],by_location?-1:t[i][2]};
         return s;
     };
     const float scale=2;const UINT w=static_cast<UINT>((window_width+2*margin_x)*scale),h=static_cast<UINT>((window_height+margin_top+margin_bottom)*scale);

@@ -32,7 +32,7 @@ Right-click an app for a Windows-style Jump List with that app's own tasks and r
 
 The tray arrow uses the app icons' rounded hover highlight and two DIP lift. Wi-Fi and sound share one quick settings button: hovering either icon highlights the pair and lifts both together. Reduced motion keeps the highlight without lifting.
 
-Quick settings has Wi-Fi and Bluetooth toggles with › pages for networks and devices (as in Windows), microphone mute, NVIDIA Instant Capture, a timer with an alarm, Windows Update status and the volume slider. The clock's second line shows the next prayer from the configured masjid website; the calendar adds that day's Adhan and Iqama times, and a chime and reminder mark each Adhan.
+Quick settings starts with Wi-Fi and Bluetooth toggles with › pages for networks and devices (as in Windows), microphone mute, NVIDIA Instant Capture, a timer with an alarm and Windows Update status, above the volume slider (and a brightness slider on built-in screens). The pencil edits the tiles: remove, drag to reorder, or add Project, Airplane mode, Dark mode and the other Windows tiles, up to three pages. The clock's second line shows the next prayer from the masjid website or calculated for your location; the calendar adds that day's Adhan and Iqama times, and a chime and reminder mark each Adhan.
 
 ## Launcher
 

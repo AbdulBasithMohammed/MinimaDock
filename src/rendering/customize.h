@@ -43,6 +43,8 @@ public:
     bool visible() const;
     // The dock calls these when prayer times arrive or settings change elsewhere.
     void prayer_updated();
+    // Device mode found a new place: shown without touching the rest of the page.
+    void prayer_location(const PrayerSettings& prayer);
     void refresh(const DockSettings& dock,const PrayerSettings& prayer,bool reduced_motion);
     struct Impl;
 private:
