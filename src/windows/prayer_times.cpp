@@ -124,6 +124,10 @@ PrayerSettings load_prayer_settings() {
         settings.located=true;settings.latitude=latitude;settings.longitude=longitude;
         settings.place=text(L"Place");settings.country=narrow(text(L"Country")).substr(0,2);
     }
+    // 1.0.0-1.0.2 saved their built-in default (Toronto) with any prayer setting.
+    // Without a website or a chosen place name, that was never the user's choice.
+    if(settings.located&&settings.website.empty()&&settings.place.empty()&&
+       std::abs(settings.latitude-43.6532)<1e-4&&std::abs(settings.longitude+79.3832)<1e-4)settings.located=false;
     return settings;
 }
 void save_prayer_settings(const PrayerSettings& settings) {
