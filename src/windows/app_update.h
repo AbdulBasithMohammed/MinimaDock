@@ -6,7 +6,7 @@
 namespace minima {
 inline constexpr UINT app_update_message=WM_APP+32;
 // MinimaDock's own version, shown in settings and compared with GitHub releases.
-inline constexpr wchar_t app_version[]=L"1.0.2";
+inline constexpr wchar_t app_version[]=L"1.0.3";
 
 struct AppUpdateStatus {
     bool checking=false,checked=false,available=false;
