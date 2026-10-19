@@ -22,6 +22,8 @@
 #include "windows/updates.h"
 #include "windows/prayer_times.h"
 #include "windows/app_update.h"
+#include "windows/quick_actions.h"
+#include "windows/brightness.h"
 #include <tlhelp32.h>
 #include <mmsystem.h>
 #include "taskbar/state_machine.h"
@@ -206,9 +208,13 @@ public:
     D2D1_RECT_F volume_track() const {const auto r=panel_rect();return D2D1::RectF(r.left+60,r.top+262,r.right-58,r.top+262);}
     D2D1_RECT_F volume_hit() const {const auto t=volume_track();return D2D1::RectF(t.left-10,t.top-13,t.right+10,t.top+13);}
     D2D1_RECT_F volume_mute_rect() const {const auto r=panel_rect();return D2D1::RectF(r.left+15,r.top+244,r.left+52,r.top+278);}
+    // Brightness row under volume, only when the built-in panel exposes it (brightness.h).
+    int brightness_level=0;bool brightness_available=false,brightness_active=false;
+    D2D1_RECT_F brightness_track() const {const auto r=panel_rect();return D2D1::RectF(r.left+60,r.top+311,r.right-58,r.top+311);}
+    D2D1_RECT_F brightness_hit() const {const auto t=brightness_track();return D2D1::RectF(t.left-10,t.top-13,t.right+10,t.top+13);}
 
     // ---- Quick settings: Wi-Fi, Bluetooth, mic, instant capture, timer, updates ----
-    enum class SettingsPage {Main,Wifi,Bluetooth,Timer};
+    enum class SettingsPage {Main,Wifi,Bluetooth,Timer,AddTiles,Project};
     enum class TimerState {Idle,Running,Paused,Ringing};
     SettingsPage settings_page=SettingsPage::Main;
     std::wstring prayer_line; // Replaces the date under the clock when set.
@@ -216,6 +222,13 @@ public:
     UpdateStatus updates;
     bool mic_available=false,mic_muted=false,overlay_running=false;
     ULONGLONG capture_sent=0;
+    // State behind the extra tiles (quick_actions.h), re-read each time the panel opens.
+    DisplayState display;std::wstring keyboard_label;int keyboard_count=0;
+    bool dark=false,captions_on=false,energy_on=false,vpn_on=false,rotation_sensor=false;
+    // Airplane mode is "every radio we can see is off" (Windows' own flag has no public API).
+    bool airplane_on() const {
+        return (net.wifi_present||net.bluetooth_present)&&!(net.wifi_present&&net.wifi_on)&&!(net.bluetooth_present&&net.bluetooth_on);
+    }
     std::wstring expanded,password; // Expanded row (SSID or device key); typed key.
     bool password_visible=false;
     float list_scroll=0;
@@ -929,16 +942,29 @@ public:
     }
     // ---- Quick settings motion (chosen in the Quick Settings Motion preview) ----
     // Lucide line icons as cached geometry, animated per part.
-    enum class Icon {Wifi,Bluetooth,Mic,Clapper,Timer,Refresh,Chevron,Back,Plus,Volume,Gear,Search,Lock,Moon,Restart,Power,Signout,Zap,Equal};
+    enum class Icon {Wifi,Bluetooth,Mic,Clapper,Timer,Refresh,Chevron,Back,Plus,Volume,Gear,Search,Lock,Moon,Restart,Power,Signout,Zap,Equal,Pencil,Minus,Monitor,Plane,Tower,Contrast,Captions,Keyboard,Cast,Leaf,Shield,Share,Access,Blend,BellOff,Sun};
     ComPtr<ID2D1StrokeStyle> icon_stroke;
     std::vector<std::vector<ComPtr<ID2D1PathGeometry>>> icon_geometry;
     ComPtr<ID2D1Layer> page_layer,row_layer;
     struct TileMotion {std::int64_t start=-1;bool toggle=false;};
-    std::array<TileMotion,6> tile_motion{};
-    std::array<std::int64_t,6> tile_lit_since{},arrow_nudge{};
-    std::array<bool,6> tile_lit{};
+    // Motion state is kept per tile (not per slot), so it follows a tile that moves.
+    static constexpr size_t tile_count=static_cast<size_t>(Tile::Count);
+    static size_t ti(Tile t){return static_cast<size_t>(t);}
+    std::array<TileMotion,tile_count> tile_motion{};
+    // -1: the tile shows its first state without a fade.
+    std::array<std::int64_t,tile_count> tile_lit_since=[]{std::array<std::int64_t,tile_count> a;a.fill(-1);return a;}(),arrow_nudge{};
+    std::array<bool,tile_count> tile_lit{};
     bool tiles_known=false,motion_tuned=false,hover_suppressed=false;
-    std::array<Spring,6> tile_press{};
+    std::array<Spring,tile_count> tile_press{};
+    // Which tiles show, in what order (quick_tiles.h). Snapshots keep the default.
+    QuickLayout quick=QuickLayout::defaults();size_t quick_page=0;
+    Tile slot_tile(size_t slot) const {return quick.at(quick_page,slot);}
+    // Edit mode: "-" badges remove, dragging reorders; + Add and Done replace the footer.
+    bool quick_edit=false;int quick_drag=-1; // Layout index of the tile being dragged.
+    D2D1_POINT_2F drag_at{},drag_grab{};     // Pointer, and where on the tile it grabbed.
+    float swipe_dx=0;                        // Live horizontal drag that pages (outside edit mode).
+    Spring quick_slide;                      // Shown page, in pages; between pages while sliding.
+    std::array<Spring,tile_count> tile_dx{},tile_dy{}; // Reflow: a tile's offset from its slot, springing to 0.
     std::int64_t back_nudge=-1,list_opened=-1,volume_wave=-1;
     Spring gear_turn,knob,page_slide;
     SettingsPage page_from=SettingsPage::Main;
@@ -968,6 +994,10 @@ public:
         build(plus,std::size(plus));build(volume,std::size(volume));build(gear,std::size(gear));
         build(search,std::size(search));build(lock,std::size(lock));build(moon,std::size(moon));build(restart,std::size(restart));
         build(power,std::size(power));build(signout,std::size(signout));build(zap,std::size(zap));build(equal,std::size(equal));
+        build(pencil,std::size(pencil));build(minus,std::size(minus));build(monitor,std::size(monitor));build(plane,std::size(plane));
+        build(tower,std::size(tower));build(contrast,std::size(contrast));build(captions,std::size(captions));build(keyboard,std::size(keyboard));
+        build(cast,std::size(cast));build(leaf,std::size(leaf));build(shield,std::size(shield));build(share,std::size(share));
+        build(access,std::size(access));build(blend,std::size(blend));build(belloff,std::size(belloff));build(sun,std::size(sun));
         const D2D1_STROKE_STYLE_PROPERTIES round{D2D1_CAP_STYLE_ROUND,D2D1_CAP_STYLE_ROUND,D2D1_CAP_STYLE_ROUND,D2D1_LINE_JOIN_ROUND,10,D2D1_DASH_STYLE_SOLID,0};
         check(factory->CreateStrokeStyle(round,nullptr,0,icon_stroke.put()));
     }
@@ -1017,7 +1047,9 @@ public:
         for(auto& s:tile_press){s.tune(500,26);s.snap(1);}  // Toggle press: 0.95 and back.
         gear_turn.tune(hover_stiffness,hover_damping);knob.tune(hover_stiffness,hover_damping);
         gear_turn.precision(.2f);knob.precision(.003f); // Degrees; knob travel 0..1.
-        page_slide.tune(320,26);page_slide.snap(1);motion_tuned=true;
+        page_slide.tune(320,26);page_slide.snap(1);quick_slide.tune(320,30);quick_slide.snap(static_cast<float>(quick_page));
+        for(size_t i=0;i<tile_count;++i){tile_dx[i].tune(380,30);tile_dy[i].tune(380,30);tile_dx[i].snap(0);tile_dy[i].snap(0);}
+        motion_tuned=true;
     }
     // Hover edges start the icon/arrow animations; state changes start the
     // highlight fades. Called before the frame loop decides whether to run.
@@ -1027,22 +1059,22 @@ public:
         if(panel==Panel::Settings&&exiting_panel==Panel::None) {
             const auto r=panel_rect();const float c=(r.left+r.right)/2,s=panel_reveal.scale();
             const float x=c+(pointer_x-c)/s,y=r.bottom+(pointer_y-r.bottom)/s;
-            if(settings_page==SettingsPage::Main) {
-                for(size_t i=0;i<6;++i)if(inside(settings_tile(i),x,y))over=static_cast<int>(split_tile(i)&&inside(tile_arrow(i),x,y)?20+i:10+i);
+            if(settings_page==SettingsPage::Main&&quick_drag<0&&swipe_dx==0&&!quick_slide.moving()) {
+                for(size_t i=0;i<tiles_per_page;++i)if(slot_tile(i)!=Tile::Count&&inside(settings_tile(i),x,y))over=static_cast<int>(split_tile(slot_tile(i))&&inside(tile_arrow(i),x,y)?20+i:10+i);
                 if(inside(settings_gear(),x,y))over=31;
             } else if(inside(page_back(),x,y))over=30;
         }
         if(over!=panel_hover) {
             const int was=panel_hover>=10&&panel_hover<26?panel_hover%10:-1,is=over>=10&&over<26?over%10:-1;
-            if(is>=0&&is!=was)tile_motion[static_cast<size_t>(is)]={now,false};
-            if(over>=20&&over<26)arrow_nudge[static_cast<size_t>(over-20)]=now;
+            if(is>=0&&is!=was)tile_motion[ti(slot_tile(static_cast<size_t>(is)))]={now,false};
+            if(over>=20&&over<26)arrow_nudge[ti(slot_tile(static_cast<size_t>(over-20)))]=now;
             if(over==30)back_nudge=now;
             panel_hover=over;
         }
         gear_turn.target(over==31?90.0f:0.0f,now,reduced);
-        for(size_t i=0;i<6;++i) {
-            const auto v=tile_view(i);const bool lit=v.on&&v.enabled;
-            if(!tiles_known)tile_lit[i]=lit;else if(lit!=tile_lit[i]){tile_lit[i]=lit;tile_lit_since[i]=now;}
+        for(size_t i=0;i<tile_count;++i) {
+            const auto v=tile_view(static_cast<Tile>(i));const bool lit=v.on&&v.enabled;
+            if(!tiles_known){tile_lit[i]=lit;tile_lit_since[i]=-1;}else if(lit!=tile_lit[i]){tile_lit[i]=lit;tile_lit_since[i]=now;}
         }
         tiles_known=true;
         if(settings_page==SettingsPage::Wifi||settings_page==SettingsPage::Bluetooth)
@@ -1055,7 +1087,8 @@ public:
         for(const auto start:arrow_nudge)if(since(start)<400)return true;
         if(since(back_nudge)<400||since(list_opened)<900||since(volume_wave)<520)return true;
         for(const auto& s:tile_press)if(s.moving())return true;
-        return gear_turn.moving()||knob.moving()||page_slide.moving();
+        for(size_t i=0;i<tile_count;++i)if(tile_dx[i].moving()||tile_dy[i].moving())return true;
+        return gear_turn.moving()||knob.moving()||page_slide.moving()||quick_slide.moving();
     }
     // Pages slide: the new page comes in from the side, the old one drifts out.
     void start_page(SettingsPage page,DockMachine::Time now) {
@@ -1067,6 +1100,50 @@ public:
         }
     }
     D2D1_RECT_F settings_gear() const{const auto r=panel_rect();return D2D1::RectF(r.right-45,r.bottom-36,r.right-16,r.bottom-5);}
+    // ---- Quick settings pages and edit mode ----
+    D2D1_RECT_F quick_area() const {const auto r=panel_rect();return D2D1::RectF(r.left+1,r.top+46,r.right-1,r.top+214);}
+    D2D1_RECT_F quick_dot(size_t p) const {
+        const auto r=panel_rect();const float c=(r.left+r.right)/2+(static_cast<float>(p)-(static_cast<float>(quick.pages())-1)/2)*16;
+        return D2D1::RectF(c-7,r.top+214,c+7,r.top+228);
+    }
+    D2D1_RECT_F quick_edit_button() const {const auto r=panel_rect();return D2D1::RectF(r.right-78,r.bottom-36,r.right-49,r.bottom-5);}
+    D2D1_RECT_F quick_add_button() const {const auto r=panel_rect();return D2D1::RectF(r.left+16,r.bottom-35,r.left+110,r.bottom-7);}
+    D2D1_RECT_F quick_done_button() const {const auto r=panel_rect();return D2D1::RectF(r.right-96,r.bottom-35,r.right-16,r.bottom-7);}
+    D2D1_RECT_F quick_empty_button() const {const auto r=panel_rect();const float c=(r.left+r.right)/2;return D2D1::RectF(c-60,r.top+112,c+60,r.top+146);}
+    D2D1_RECT_F tile_remove(size_t i) const {const auto t=settings_tile(i);return D2D1::RectF(t.left-7,t.top-7,t.left+11,t.top+11);}
+    float page_width() const {const auto r=panel_rect();return r.right-r.left;}
+    // Where layout index k sits, pages laid side by side (page 0 at x 0).
+    D2D1_POINT_2F quick_home(size_t k) const {const auto t=settings_tile(k%tiles_per_page);return D2D1::Point2F(t.left+static_cast<float>(k/tiles_per_page)*page_width(),t.top);}
+    // Slot on the shown page nearest to a panel point (tiles and labels count).
+    size_t quick_slot_at(float x,float y) const {
+        const auto r=panel_rect();
+        const auto col=std::clamp(static_cast<int>((x-(r.left+15))/109),0,2),row=std::clamp(static_cast<int>((y-(r.top+51))/85),0,1);
+        return static_cast<size_t>(row*3+col);
+    }
+    // Animate tiles from where they were in `before` to their new slots.
+    void reflow(const QuickLayout& before,DockMachine::Time now) {
+        tune_motion();
+        for(size_t k=0;k<quick.tiles.size();++k) {
+            const auto it=std::find(before.tiles.begin(),before.tiles.end(),quick.tiles[k]);
+            if(it==before.tiles.end()||static_cast<int>(k)==quick_drag)continue;
+            const auto was=quick_home(static_cast<size_t>(it-before.tiles.begin())),is=quick_home(k);
+            if(was.x==is.x&&was.y==is.y)continue;
+            auto& dx=tile_dx[ti(quick.tiles[k])];auto& dy=tile_dy[ti(quick.tiles[k])];
+            dx.snap(dx.value()+was.x-is.x);dy.snap(dy.value()+was.y-is.y);dx.target(0,now,reduced);dy.target(0,now,reduced);
+        }
+    }
+    // Add tiles page: a two-column grid of the tiles not shown.
+    D2D1_RECT_F add_cell(size_t i) const {
+        const auto a=page_list();const float w=(a.right-a.left-16)/2,x=a.left+4+static_cast<float>(i%2)*(w+8),y=a.top+4+static_cast<float>(i/2)*42-list_scroll;
+        return D2D1::RectF(x,y,x+w,y+36);
+    }
+    // Tiles offered in Add: those not shown, minus ones this PC can never use.
+    std::vector<Tile> addable() const {
+        auto list=quick.hidden();
+        std::erase_if(list,[&](Tile t){return (t==Tile::Rotation&&!rotation_sensor)||(t==Tile::Keyboard&&keyboard_count<2);});
+        return list;
+    }
+    float add_extent() const {return static_cast<float>((addable().size()+1)/2)*42+8;}
     TimerState timer_state=TimerState::Idle;
     std::int64_t timer_duration=5*60000,timer_left=0;
     ULONGLONG timer_end=0;
@@ -1081,7 +1158,7 @@ public:
         return value;
     }
     static std::wstring minutes_text(std::int64_t ms){const auto m=ms/60000;return m>=60&&m%60==0?std::to_wstring(m/60)+L" hr":std::to_wstring(m)+L" min";}
-    static bool split_tile(size_t i){return i==0||i==1||i==4;}
+    static bool split_tile(Tile t){return spec(t).split;}
     D2D1_RECT_F settings_tile(size_t i) const {const auto r=panel_rect();const float x=r.left+20+static_cast<float>(i%3)*109,y=r.top+56+static_cast<float>(i/3)*85;return D2D1::RectF(x,y,x+100,y+48);}
     D2D1_RECT_F tile_arrow(size_t i) const {const auto t=settings_tile(i);return D2D1::RectF(t.left+67,t.top,t.right,t.bottom);}
     D2D1_RECT_F page_back() const {const auto r=panel_rect();return D2D1::RectF(r.left+12,r.top+10,r.left+44,r.top+42);}
@@ -1117,47 +1194,59 @@ public:
         switch(timer_state){case TimerState::Idle:return {L"Start"};case TimerState::Running:return {L"Pause",L"Reset"};case TimerState::Paused:return {L"Resume",L"Reset"};default:return {L"Dismiss",L"+5 min"};}
     }
     struct TileView {const wchar_t* glyph;std::wstring label;bool on,enabled,badge;};
-    TileView tile_view(size_t i) const {
-        switch(i) {
-        case 0:{
+    TileView tile_view(Tile t) const {
+        switch(t) {
+        case Tile::Wifi:{
             std::wstring label=!net.wifi_on?L"Wi-Fi":!net.connecting.empty()?L"Connecting\x2026":!net.wifi_name.empty()?net.wifi_name:net.wifi_connected?L"Connected":L"Not connected";
             return {L"\xE701",label,net.wifi_on,net.wifi_present,false};
         }
-        case 1:{
+        case Tile::Bluetooth:{
             std::wstring label=L"Bluetooth";
             if(net.bluetooth_on){label=L"Not connected";for(const auto& d:net.devices)if(d.connected){label=d.name;break;}}
             return {L"\xE702",label,net.bluetooth_on,net.bluetooth_present,false};
         }
-        case 2:return {mic_muted?L"\xEC54":L"\xE720",!mic_available?L"No microphone":mic_muted?L"Mic muted":L"Mic on",mic_muted,mic_available,false};
-        case 3:{const bool sent=capture_sent&&GetTickCount64()-capture_sent<2500;return {L"\xE714",sent?L"Saving clip":overlay_running?L"Instant capture":L"NVIDIA overlay off",sent,true,false};}
-        case 4:{
+        case Tile::Mic:return {mic_muted?L"\xEC54":L"\xE720",!mic_available?L"No microphone":mic_muted?L"Mic muted":L"Mic on",mic_muted,mic_available,false};
+        case Tile::Capture:{const bool sent=capture_sent&&GetTickCount64()-capture_sent<2500;return {L"\xE714",sent?L"Saving clip":overlay_running?L"Instant capture":L"NVIDIA overlay off",sent,true,false};}
+        case Tile::Timer:{
             const auto left=timer_remaining();
             std::wstring label=timer_state==TimerState::Idle?L"Timer":timer_state==TimerState::Ringing?L"Time's up":timer_state==TimerState::Paused?L"Paused "+clock_text(left):clock_text(left);
             return {L"\xE916",label,timer_state==TimerState::Running||timer_state==TimerState::Ringing,true,false};
         }
-        default:{
+        case Tile::Updates:{
             std::wstring label=!updates.known?L"Windows Update":updates.restart?L"Restart to update":updates.pending>0?std::to_wstring(updates.pending)+(updates.pending==1?L" update":L" updates"):L"Up to date";
             return {L"\xE895",label,false,true,updates.restart||updates.pending>0};
         }
+        case Tile::Project:{
+            const wchar_t* mode=display.displays<2?L"Project":display.mode==DisplayMode::Clone?L"Duplicate":display.mode==DisplayMode::Extend?L"Extend":display.mode==DisplayMode::External?L"Second screen":L"PC screen only";
+            return {L"",mode,display.displays>1&&display.mode!=DisplayMode::Internal,true,false};
+        }
+        case Tile::Airplane:return {L"",L"Airplane mode",airplane_on(),net.wifi_present||net.bluetooth_present,false};
+        case Tile::DarkMode:return {L"",L"Dark mode",dark,true,false};
+        case Tile::Captions:return {L"",L"Live captions",captions_on,true,false};
+        case Tile::Keyboard:return {L"",keyboard_label.empty()?L"Keyboard":keyboard_label,false,keyboard_count>1,false};
+        case Tile::EnergySaver:return {L"",L"Energy saver",energy_on,true,false};
+        case Tile::Vpn:return {L"",vpn_on?L"VPN connected":L"VPN",vpn_on,true,false};
+        case Tile::Rotation:return {L"",L"Rotation lock",false,rotation_sensor,false};
+        default:return {L"",std::wstring(spec(t).name),false,true,false}; // Settings launchers.
         }
     }
-    void tile_icon(size_t i,float cx,float cy,D2D1_COLOR_F ink) {
-        constexpr float size=18;const auto& m=tile_motion[i];const float t=since(m.start);
-        switch(i) {
-        case 0: // Wi-Fi: the bars fade out and back in, one after another.
+    void tile_icon(Tile tile,float cx,float cy,D2D1_COLOR_F ink) {
+        constexpr float size=18;const auto& m=tile_motion[ti(tile)];const float t=since(m.start);
+        switch(tile) {
+        case Tile::Wifi: // Wi-Fi: the bars fade out and back in, one after another.
             for(size_t b=0;b<4;++b) {
                 float o=1;
                 if(net.wifi_on){const float p=(t-90*static_cast<float>(b))/420;if(p>0&&p<1)o=keys(ease_in_out(p),{1,0,1});}
                 icon_part(Icon::Wifi,b,cx,cy,size,fade(ink,o));
             }
             break;
-        case 1: { // Bluetooth: wiggles on hover, draws itself in when turned on.
+        case Tile::Bluetooth: { // Bluetooth: wiggles on hover, draws itself in when turned on.
             const float angle=!m.toggle&&t<420?keys(ease_in_out(t/420),{0,-10,8,0}):0;
             const float drawn=m.toggle&&net.bluetooth_on&&t<420?ease_out(t/420):1;
             icon_part(Icon::Bluetooth,0,cx,cy,size,ink,turn(angle,12,12),drawn);
             break;
         }
-        case 2: { // Mic: hops on hover; the mute slash draws across (and back off).
+        case Tile::Mic: { // Mic: hops on hover; the mute slash draws across (and back off).
             const float hop=!m.toggle&&!mic_muted&&t<360?keys(ease_in_out(t/360),{0,-2,0}):0;
             for(size_t p=0;p<3;++p)icon_part(Icon::Mic,p,cx,cy,size,ink,nudge(0,hop));
             float slash=mic_muted?1.0f:0.0f;
@@ -1165,21 +1254,68 @@ public:
             icon_part(Icon::Mic,3,cx,cy,size,ink,D2D1::Matrix3x2F::Identity(),slash);
             break;
         }
-        case 3: { // Instant capture: the clapper snaps shut.
+        case Tile::Capture: { // Instant capture: the clapper snaps shut.
             const float d=m.toggle?300.0f:420.0f,a=t<d?keys(ease_in_out(t/d),{0,-14,0}):0;
             icon_part(Icon::Clapper,0,cx,cy,size,ink,turn(a,3,11));icon_part(Icon::Clapper,1,cx,cy,size,ink);
             break;
         }
-        case 4: { // Timer: the hand sweeps once round.
+        case Tile::Timer: { // Timer: the hand sweeps once round.
             const float d=m.toggle?700.0f:600.0f,a=t<d?360*ease_in_out(t/d):0;
             icon_part(Icon::Timer,0,cx,cy,size,ink);icon_part(Icon::Timer,1,cx,cy,size,ink,turn(a,12,14));icon_part(Icon::Timer,2,cx,cy,size,ink);
             break;
         }
-        default: { // Windows Update: tilts on hover, spins once when clicked.
+        case Tile::Updates: { // Windows Update: tilts on hover, spins once when clicked.
             float a=0;
             if(m.toggle&&t<900)a=360*bezier(.3f,1.4f,.5f,1,t/900);
             else if(!m.toggle&&t<650)a=keys(ease_in_out(t/650),{0,45,0});
             icon_part(Icon::Refresh,0,cx,cy,size,ink,turn(a,12,12));
+            break;
+        }
+        // The newer tiles share a few small motions: a wiggle, a hop, or a part drawing in.
+        case Tile::Project: { // The stand stays, the screen hops.
+            const float hop=t<360?keys(ease_in_out(t/360),{0,-2,0}):0;
+            icon_part(Icon::Monitor,0,cx,cy,size,ink,nudge(0,hop));icon_part(Icon::Monitor,1,cx,cy,size,ink);
+            break;
+        }
+        case Tile::Airplane: { // Takes off: a short climb up and to the right.
+            const float p=t<480?keys(ease_in_out(t/480),{0,1,0}):0;
+            icon_part(Icon::Plane,0,cx,cy,size,ink,nudge(2.5f*p,-2.5f*p));
+            break;
+        }
+        case Tile::Hotspot: // The waves pulse out from the mast.
+            icon_part(Icon::Tower,0,cx,cy,size,ink);
+            for(size_t w=1;w<3;++w){const float p=(t-120*static_cast<float>(w-1))/400;icon_part(Icon::Tower,w,cx,cy,size,fade(ink,p>0&&p<1?keys(ease_in_out(p),{1,0,1}):1));}
+            break;
+        case Tile::DarkMode: { // The half turns over.
+            const float a=t<600?180*ease_in_out(t/600):0;
+            icon_part(Icon::Contrast,0,cx,cy,size,ink);icon_part(Icon::Contrast,1,cx,cy,size,ink,turn(a,12,12));
+            break;
+        }
+        case Tile::Captions: // The caption lines write themselves in.
+            icon_part(Icon::Captions,0,cx,cy,size,ink);icon_part(Icon::Captions,1,cx,cy,size,ink,D2D1::Matrix3x2F::Identity(),t<420?ease_out(t/420):1);
+            break;
+        case Tile::Keyboard: { // The keys press down.
+            const float press=t<300?keys(ease_in_out(t/300),{0,1.5f,0}):0;
+            icon_part(Icon::Keyboard,0,cx,cy,size,ink);icon_part(Icon::Keyboard,1,cx,cy,size,ink,nudge(0,press));
+            break;
+        }
+        case Tile::Cast: // The waves draw in from the corner.
+            icon_part(Icon::Cast,0,cx,cy,size,ink);icon_part(Icon::Cast,1,cx,cy,size,ink,D2D1::Matrix3x2F::Identity(),t<420?ease_out(t/420):1);
+            break;
+        case Tile::DoNotDisturb: { // The bell rings, the slash draws across.
+            const float a=t<480?keys(ease_in_out(t/480),{0,-12,10,-6,0}):0;
+            icon_part(Icon::BellOff,0,cx,cy,size,ink,turn(a,12,4));icon_part(Icon::BellOff,1,cx,cy,size,ink,D2D1::Matrix3x2F::Identity(),t<300?ease_out(t/300):1);
+            break;
+        }
+        case Tile::Nearby: { // The links draw between the dots.
+            icon_part(Icon::Share,0,cx,cy,size,ink);icon_part(Icon::Share,1,cx,cy,size,ink,D2D1::Matrix3x2F::Identity(),t<420?ease_out(t/420):1);
+            break;
+        }
+        default: { // Single-part icons wiggle.
+            const Icon which=tile==Tile::EnergySaver?Icon::Leaf:tile==Tile::Vpn?Icon::Shield:tile==Tile::NightLight?Icon::Moon:
+                tile==Tile::Accessibility?Icon::Access:tile==Tile::ColorFilters?Icon::Blend:Icon::Lock;
+            const float a=t<420?keys(ease_in_out(t/420),{0,-10,8,0}):0;
+            for(size_t p=0;p<icon_geometry[static_cast<size_t>(which)].size();++p)icon_part(which,p,cx,cy,size,ink,turn(a,12,12));
             break;
         }
         }
@@ -1197,18 +1333,51 @@ public:
         if(primary&&over)rect(b,theme::rgb(0xffffff,.10f),6);else if(!primary)outline(b,pal.tile_edge,6);
         text(label,b,1,primary?pal.on_accent:pal.ink,true);
     }
+    // Pages sit side by side and slide; with one page this draws exactly as before.
     void draw_settings_tiles(D2D1_RECT_F r) {
-        text(L"Quick settings",D2D1::RectF(r.left+20,r.top+12,r.right-20,r.top+40),2,pal.ink);
-        for(size_t i=0;i<6;++i) {
-            const auto tile=settings_tile(i);const auto v=tile_view(i);const bool split=split_tile(i),lit=v.on&&v.enabled,over=hover(tile);
+        text(quick_edit?L"Edit quick settings":L"Quick settings",D2D1::RectF(r.left+20,r.top+12,r.right-20,r.top+40),2,pal.ink);
+        if(quick.tiles.empty()){settings_button(quick_empty_button(),L"+ Add tiles",false);return;}
+        const size_t pages=quick.pages();const float width=page_width(),shown=quick_slide.value()-swipe_dx/width;
+        const bool clip=pages>1||swipe_dx!=0||quick_slide.moving()||quick_drag>=0;
+        if(clip)target->PushAxisAlignedClip(quick_area(),D2D1_ANTIALIAS_MODE_ALIASED);
+        const bool suppressed=hover_suppressed;
+        for(size_t p=0;p<pages;++p) {
+            const float dx=(static_cast<float>(p)-shown)*width;if(std::abs(dx)>=width)continue;
+            hover_suppressed=suppressed||std::abs(dx)>.5f||quick_drag>=0;
+            for(size_t i=0;i<tiles_per_page;++i) {
+                const size_t k=p*tiles_per_page+i;const auto id=quick.at(p,i);if(id==Tile::Count||static_cast<int>(k)==quick_drag)continue;
+                const auto home=settings_tile(i);const float ox=dx+tile_dx[ti(id)].value(),oy=tile_dy[ti(id)].value();
+                draw_tile(id,D2D1::RectF(home.left+ox,home.top+oy,home.right+ox,home.bottom+oy));
+            }
+        }
+        hover_suppressed=suppressed;
+        if(clip)target->PopAxisAlignedClip();
+        // The dragged tile floats above the others, slightly lifted.
+        if(quick_drag>=0&&static_cast<size_t>(quick_drag)<quick.tiles.size()) {
+            const float x=drag_at.x-drag_grab.x,y=drag_at.y-drag_grab.y;const auto tile=D2D1::RectF(x,y,x+100,y+48);
+            D2D1_MATRIX_3X2_F before;target->GetTransform(&before);
+            target->SetTransform(D2D1::Matrix3x2F::Scale(1.05f,1.05f,D2D1::Point2F(x+50,y+24))*before);
+            rect(D2D1::RectF(tile.left+1,tile.top+3,tile.right+1,tile.bottom+4),theme::rgb(0x000000,.18f),9);
+            draw_tile(quick.tiles[static_cast<size_t>(quick_drag)],tile);
+            target->SetTransform(before);
+        }
+        if(pages>1)for(size_t p=0;p<pages;++p) {
+            const auto d=quick_dot(p);const bool current=p==quick_page;if(hover(d))rect(d,pal.hover,7);
+            color(current?pal.ink:pal.ink_muted);const float radius=current?3.5f:3;
+            target->FillEllipse(D2D1::Ellipse(D2D1::Point2F((d.left+d.right)/2,(d.top+d.bottom)/2),radius,radius),brush.get());
+        }
+    }
+    void draw_tile(Tile id,D2D1_RECT_F tile) {
+        {
+            const auto v=tile_view(id);const bool split=split_tile(id),lit=v.on&&v.enabled,over=hover(tile);
             const auto centre=D2D1::Point2F((tile.left+tile.right)/2,(tile.top+tile.bottom)/2);
             // Press: the tile squeezes to 0.95 and springs back.
             D2D1_MATRIX_3X2_F before;target->GetTransform(&before);
-            const float squeeze=tile_press[i].value();
+            const float squeeze=tile_press[ti(id)].value();
             target->SetTransform(D2D1::Matrix3x2F::Scale(squeeze,squeeze,centre)*before);
             // On: the accent fades and grows in; off: it fades out.
             float k=lit?1.0f:0.0f,grow=1;
-            if(const float t=since(tile_lit_since[i]);t<180){const float e=bezier(.2f,.8f,.2f,1,t/180);k=lit?e:1-e;if(lit)grow=.9f+.1f*e;}
+            if(const float t=since(tile_lit_since[ti(id)]);t<180){const float e=bezier(.2f,.8f,.2f,1,t/180);k=lit?e:1-e;if(lit)grow=.9f+.1f*e;}
             rect(tile,over?pal.hover_strong:pal.tile,8);
             if(k<1)outline(tile,fade(pal.tile_edge,1-k),8);
             if(k>0) {
@@ -1216,15 +1385,22 @@ public:
                 if(over)rect(tile,theme::rgb(0xffffff,.10f*k),8);
             }
             const auto ink=!v.enabled?pal.ink_muted:k>.5f?pal.on_accent:pal.ink;
-            tile_icon(i,split?tile.left+33.5f:centre.x,centre.y,ink);
+            tile_icon(id,split?tile.left+33.5f:centre.x,centre.y,ink);
             if(split) {
                 line(tile.left+67,tile.top+10,tile.left+67,tile.bottom-10,k>.5f?theme::rgb(0x000000,.20f):pal.separator);
-                const float t=since(arrow_nudge[i]),dx=t<380?keys(ease_in_out(t/380),{0,3,0}):0;
+                const float t=since(arrow_nudge[ti(id)]),dx=t<380?keys(ease_in_out(t/380),{0,3,0}):0;
                 icon(Icon::Chevron,tile.left+83.5f+dx,centre.y,16,ink);
             }
             if(v.badge){color(pal.accent);target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(tile.right-9,tile.top+9),4,4),brush.get());}
             target->SetTransform(before);
             text(v.label,D2D1::RectF(tile.left-4,tile.top+51,tile.right+4,tile.top+72),0,pal.ink,true);
+            if(quick_edit) { // Remove badge.
+                const auto b=D2D1::RectF(tile.left-7,tile.top-7,tile.left+11,tile.top+11);const auto c=D2D1::Point2F(tile.left+2,tile.top+2);
+                color(pal.solid_top);target->FillEllipse(D2D1::Ellipse(c,9,9),brush.get()); // Opaque: it overlaps the tile edge.
+                if(hover(b)){color(pal.hover_strong);target->FillEllipse(D2D1::Ellipse(c,9,9),brush.get());}
+                color(pal.separator);target->DrawEllipse(D2D1::Ellipse(c,9,9),brush.get(),1);
+                icon(Icon::Minus,c.x,c.y,12,pal.ink);
+            }
         }
     }
     void page_header(D2D1_RECT_F r,const wchar_t* title,int toggle) { // toggle: -1 none, 0 off, 1 on
@@ -1301,6 +1477,17 @@ public:
         for(size_t i=0;i<labels.size();++i)settings_button(timer_button(i,labels.size()),labels[i],i==0);
         text(L"An alarm sounds when time is up.",D2D1::RectF(r.left+20,r.bottom-36,r.right-20,r.bottom-10),0,pal.ink_secondary,true);
     }
+    // A horizontal slider on `track` (a zero-height rect): accent fill and a ringed knob.
+    void slider(D2D1_RECT_F track,float level,bool muted,bool grabbed,bool knob=true) {
+        const auto a=track.left,b=track.right,y=track.top;
+        rect(D2D1::RectF(a,y-2,b,y+2),pal.track,2);
+        if(!knob)return;
+        const float k=a+(b-a)*std::clamp(level,0.0f,1.0f);
+        if(k>a+1)rect(D2D1::RectF(a,y-2,k,y+2),muted?pal.ink_muted:pal.accent,2);
+        color(pal.light?theme::rgb(0xffffff):theme::rgb(0x2b2b31));target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(k,y),9,9),brush.get());
+        color(pal.tile_edge);target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(k,y),9,9),brush.get(),1);
+        color(muted?pal.ink_muted:pal.accent);target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(k,y),grabbed?5.5f:4.5f,grabbed?5.5f:4.5f),brush.get());
+    }
     void draw_settings_main(D2D1_RECT_F r) {
         draw_settings_tiles(r);
         line(r.left+20,r.top+231,r.right-20,r.top+231,pal.separator);
@@ -1318,21 +1505,25 @@ public:
                 icon_part(Icon::Volume,1+w,cx,cy,18,fade(ink,p>0&&p<1?keys(ease_in_out(p),{1,.15f,1}):1));
             }
         }
-        const auto track=volume_track();const auto a=track.left,b=track.right,y=track.top;
-        rect(D2D1::RectF(a,y-2,b,y+2),pal.track,2);
-        if(volume_available) {
-            const float k=a+(b-a)*(volume_muted?0.0f:std::clamp(volume_level,0.0f,1.0f));
-            if(k>a+1)rect(D2D1::RectF(a,y-2,k,y+2),volume_muted?pal.ink_muted:pal.accent,2);
-            const bool grabbed=slider_active||hover(volume_hit());
-            color(pal.light?theme::rgb(0xffffff):theme::rgb(0x2b2b31));target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(k,y),9,9),brush.get());
-            color(pal.tile_edge);target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(k,y),9,9),brush.get(),1);
-            color(volume_muted?pal.ink_muted:pal.accent);target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(k,y),grabbed?5.5f:4.5f,grabbed?5.5f:4.5f),brush.get());
-        }
+        if(volume_available)slider(volume_track(),volume_muted?0.0f:volume_level,volume_muted,slider_active||hover(volume_hit()));
+        else slider(volume_track(),0,false,false,false);
         icon(Icon::Chevron,r.right-32,r.top+261,16,pal.ink);
         const std::wstring volume_label=!volume_available?L"No output device":volume_muted?L"Muted":L"Volume "+std::to_wstring(static_cast<int>(std::lround(volume_level*100)))+L"%";
         text(volume_label,D2D1::RectF(r.left+60,r.top+277,r.right-20,r.top+297),0,pal.ink_secondary);
+        if(brightness_available) { // The sun's rays turn while it changes.
+            const float cx=r.left+33.5f,cy=r.top+310;
+            icon_part(Icon::Sun,0,cx,cy,18,pal.ink);icon_part(Icon::Sun,1,cx,cy,18,pal.ink,turn(brightness_active?static_cast<float>(brightness_level)*.9f:0,12,12));
+            slider(brightness_track(),static_cast<float>(brightness_level)/100,false,brightness_active||hover(brightness_hit()));
+            text(L"Brightness "+std::to_wstring(brightness_level)+L"%",D2D1::RectF(r.left+60,r.top+326,r.right-20,r.top+346),0,pal.ink_secondary);
+        }
         line(r.left+1,r.bottom-40,r.right-1,r.bottom-40,pal.separator);
-        text(desktop?L"Windows taskbar · Ctrl+Alt+Backspace":(recovery_entry.empty()?L"Recovery bundle not prepared":L"Restore Windows desktop"),D2D1::RectF(r.left+20,r.bottom-33,r.right-55,r.bottom-8),0,pal.ink);
+        if(quick_edit) {
+            settings_button(quick_add_button(),quick.full()?L"Full":L"+ Add",false);
+            settings_button(quick_done_button(),L"Done",true);
+            return;
+        }
+        text(desktop?L"Windows taskbar · Ctrl+Alt+Backspace":(recovery_entry.empty()?L"Recovery bundle not prepared":L"Restore Windows desktop"),D2D1::RectF(r.left+20,r.bottom-33,r.right-88,r.bottom-8),0,pal.ink);
+        {const auto e=quick_edit_button();if(hover(e))rect(e,pal.hover,6);icon(Icon::Pencil,(e.left+e.right)/2,(e.top+e.bottom)/2,16,pal.ink);}
         {const auto g=settings_gear();const float cx=(g.left+g.right)/2,cy=(g.top+g.bottom)/2; // The gear turns a quarter on hover.
          icon_part(Icon::Gear,0,cx,cy,18,pal.ink,turn(gear_turn.value(),12,12));icon_part(Icon::Gear,1,cx,cy,18,pal.ink);}
     }
@@ -1356,8 +1547,51 @@ public:
         if(faded)target->PopLayer();
         target->SetTransform(before);settings_page=current;hover_suppressed=false;
     }
+    void draw_add_page(D2D1_RECT_F r) {
+        page_header(r,L"Add tiles",-1);
+        line(r.left+1,r.bottom-44,r.right-1,r.bottom-44,pal.separator);
+        {const auto a=page_footer_link();if(hover(a))rect(a,pal.hover,6);text(L"Reset to default",D2D1::RectF(a.left+10,a.top,a.right,a.bottom),1,pal.ink);}
+        const auto hidden=addable();
+        if(hidden.empty()){page_notice(r,L"Every tile is shown",L"",nullptr);return;}
+        if(quick.full()){page_notice(r,L"Quick settings is full",L"Remove a tile to add another.",nullptr);return;}
+        const auto area=page_list();
+        target->PushAxisAlignedClip(area,D2D1_ANTIALIAS_MODE_ALIASED);
+        for(size_t i=0;i<hidden.size();++i) {
+            const auto c=add_cell(i);if(c.bottom<=area.top||c.top>=area.bottom)continue;
+            rect(c,hover(c)?pal.hover_strong:pal.tile,6);outline(c,pal.tile_edge,6);
+            const float cy=(c.top+c.bottom)/2;tile_icon(hidden[i],c.left+20,cy,pal.ink);
+            text(spec(hidden[i]).name,D2D1::RectF(c.left+38,c.top,c.right-24,c.bottom),0,pal.ink);
+            icon(Icon::Plus,c.right-14,cy,14,pal.ink_secondary);
+        }
+        target->PopAxisAlignedClip();
+    }
+    // Project: the four Win+P modes, the current one in accent.
+    static constexpr DisplayMode project_modes[]={DisplayMode::Internal,DisplayMode::Clone,DisplayMode::Extend,DisplayMode::External};
+    D2D1_RECT_F project_cell(size_t i) const {
+        const auto r=panel_rect();const float w=(r.right-r.left-48)/2,x=r.left+20+static_cast<float>(i%2)*(w+8),y=r.top+60+static_cast<float>(i/2)*80;
+        return D2D1::RectF(x,y,x+w,y+72);
+    }
+    void draw_project_page(D2D1_RECT_F r) {
+        page_header(r,L"Project",-1);
+        page_footer(r,L"Display settings",Icon::Monitor);
+        if(display.displays<2){page_notice(r,L"Only one display",L"Connect a display or projector to project.",nullptr);return;}
+        static constexpr const wchar_t* names[]={L"PC screen only",L"Duplicate",L"Extend",L"Second screen only"};
+        for(size_t i=0;i<4;++i) {
+            const auto c=project_cell(i);const bool on=display.mode==project_modes[i];
+            rect(c,on?pal.accent:hover(c)?pal.hover_strong:pal.tile,6);if(!on)outline(c,pal.tile_edge,6);
+            const auto ink=on?pal.on_accent:pal.ink;
+            // Two small screens show the mode: which one is lit, or both.
+            const float cx=(c.left+c.right)/2,cy=c.top+26;
+            const bool left=i!=3,right=i!=0;
+            icon(Icon::Monitor,cx-12,cy,18,fade(ink,left?1:.35f));
+            if(i==2)icon(Icon::Monitor,cx+12,cy,18,ink);else icon(Icon::Monitor,cx+12,cy,18,fade(ink,right?1:.35f));
+            text(names[i],D2D1::RectF(c.left+6,c.top+44,c.right-6,c.bottom-6),0,ink,true);
+        }
+    }
     void draw_settings_page(D2D1_RECT_F r) {
         if(settings_page==SettingsPage::Timer){draw_timer_page(r);return;}
+        if(settings_page==SettingsPage::Project){draw_project_page(r);return;}
+        if(settings_page==SettingsPage::AddTiles){draw_add_page(r);return;}
         const bool wifi=settings_page==SettingsPage::Wifi;
         page_header(r,wifi?L"Wi-Fi":L"Bluetooth",wifi?(net.wifi_present?(net.wifi_on?1:0):-1):(net.bluetooth_present?(net.bluetooth_on?1:0):-1));
         page_footer(r,wifi?L"More Wi-Fi settings":L"More Bluetooth settings",wifi?Icon::Refresh:Icon::Plus);
@@ -1654,7 +1888,7 @@ public:
         }
         const float w=std::min(width-40,360.0f);
         const float right=std::min(width-20,system_rect().right+8);
-        return D2D1::RectF(right-w,bottom-348,right,bottom);
+        return D2D1::RectF(right-w,bottom-(panel==Panel::Settings&&brightness_available?392:348),right,bottom);
     }
     D2D1_RECT_F tray_tile(size_t i) const {const auto r=panel_rect();const auto columns=std::min<size_t>(5,std::max<size_t>(1,tray_items.size()));const auto x=r.left+16+44*static_cast<float>(i%columns),y=r.top+44+44*static_cast<float>(i/columns);return D2D1::RectF(x,y,x+44,y+44);}
     int tray_hit(float x,float y) const {if(panel!=Panel::Tray||!native_tray)return -1;for(size_t i=0;i<std::min<size_t>(30,tray_items.size()-std::min(tray_scroll,tray_items.size()));++i)if(inside(tray_tile(i),x,y))return static_cast<int>(i+tray_scroll);return -1;}
@@ -1772,7 +2006,7 @@ public:
         if(slots_placed&&slots_visual.goal()!=static_cast<float>(shown_groups()))slots_visual.target(static_cast<float>(shown_groups()),time,reduced);
         slots_visual.tick(time);
         std::erase_if(ghosts,[&](const Ghost& g){return reduced||static_cast<float>(time-g.start)>=vanish_time;});
-        sync_panel_motion(time);for(auto& spring:tile_press)spring.tick(time);gear_turn.tick(time);knob.tick(time);page_slide.tick(time);
+        sync_panel_motion(time);for(auto& spring:tile_press)spring.tick(time);gear_turn.tick(time);knob.tick(time);page_slide.tick(time);quick_slide.tick(time);for(size_t i=0;i<tile_count;++i){tile_dx[i].tick(time);tile_dy[i].tick(time);}
         indicator.tick(time);if(indicator_shown)indicator_x=indicator.current(time);
         launcher_pulse.tick(time);tray_pulse.tick(time);settings_pulse.tick(time);clock_pulse.tick(time);desktop_pulse.tick(time);panel_reveal.tick(time);
         if(panel_reveal.hidden())exiting_panel=Panel::None;
@@ -1787,7 +2021,7 @@ public:
         tip_show.snap(tip_show.goal());tip_x.snap(tip_x.goal());
         slots_visual.snap(slots_visual.goal());ghosts.clear();for(auto& g:groups)g.appeared=-1;
         for(auto& spring:wings)spring.snap(spring.goal());
-        for(auto& spring:tile_press)spring.snap(spring.goal());gear_turn.snap(gear_turn.goal());knob.snap(knob.goal());page_slide.snap(page_slide.goal());
+        for(auto& spring:tile_press)spring.snap(spring.goal());gear_turn.snap(gear_turn.goal());knob.snap(knob.goal());page_slide.snap(page_slide.goal());quick_slide.snap(quick_slide.goal());for(size_t i=0;i<tile_count;++i){tile_dx[i].snap(0);tile_dy[i].snap(0);}
     }
     float click_scale(const ClickPulse& pulse,bool down=false) const{return reduced?1.0f:down?.94f:pulse.scale();}
     void bubble(float x,float y,const ClickPulse& pulse,float opacity=1,float squeeze=1) {
@@ -2303,7 +2537,9 @@ public:
         hooks.version=app_version;
         hooks.dock_changed=[this](const DockSettings& s){apply_dock_settings(s);};
         hooks.prayer_changed=[this](const PrayerSettings& s,bool website){
-            const bool restart=website||s.method!=prayer_settings.method||s.calculate!=prayer_settings.calculate||s.latitude!=prayer_settings.latitude||s.longitude!=prayer_settings.longitude;
+            const auto& o=prayer_settings;
+            const bool restart=website||s.source!=o.source||s.locate!=o.locate||s.method!=o.method||s.calculate!=o.calculate||
+                               s.calc_method!=o.calc_method||s.asr!=o.asr||!s.same_location(o);
             prayer_settings=s;save_prayer_settings(s);
             if(restart)prayers.start(hwnd,prayer_settings);
             prayer_tick();schedule();
@@ -2550,9 +2786,11 @@ public:
         wchar_t text[32]{};GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT,TIME_NOSECONDS|(marker?0:TIME_NOTIMEMARKER),&t,nullptr,text,32);return text;
     }
     PrayerView prayer_view(const PrayerSnapshot& snap,int now,bool friday,bool today) const {
-        PrayerView view;view.visible=snap.have;view.website=prayer_settings.website;
+        PrayerView view;view.visible=snap.have;
+        if(prayer_settings.source==PrayerSource::Website)view.website=prayer_settings.website;
         if(!snap.have)return view;
         if(!today){SYSTEMTIME d{};d.wYear=static_cast<WORD>(snap.day.year);d.wMonth=static_cast<WORD>(snap.day.month);d.wDay=static_cast<WORD>(snap.day.day);wchar_t text[64]{};GetDateFormatEx(LOCALE_NAME_USER_DEFAULT,0,&d,L"MMM d",text,64,nullptr);view.status=std::wstring(L"Times from ")+text;}
+        else if(prayer_settings.source==PrayerSource::Location)view.status=prayer_settings.place.empty()?L"Calculated":prayer_settings.place; // Calculated times have no "updated".
         else view.status=snap.error.empty()?L"Updated "+snap.updated:L"Offline \x00B7 "+snap.updated;
         const auto next=next_prayer(snap.day,now,friday);const auto order=daily_salah(snap.day,friday);
         const Salah rows[]={order[0],Salah::Sunrise,order[1],order[2],order[3],order[4]};
@@ -2617,6 +2855,9 @@ public:
     // ---- Quick settings ----
     Connectivity connectivity;
     UpdateMonitor updates;
+    Brightness brightness;
+    bool airplane_wifi=false,airplane_bluetooth=false; // Radios Airplane mode turned off, to restore.
+    std::vector<WORD> pending_keys;                    // Shortcut sent once the panel has let go of focus.
     JumpList alarm_card{alarm_event_message};
     unsigned alarm_session=0;
     bool updates_stale=false;
@@ -2631,14 +2872,149 @@ public:
         if(!scene.password.empty())SecureZeroMemory(scene.password.data(),scene.password.size()*sizeof(wchar_t));
         scene.password.clear();scene.password_visible=false;
     }
+    // Cheap reads (registry, process list, Win32 queries), so the new tiles open
+    // showing the truth. The keyboard layout is the app's from before the panel.
+    void read_quick_states() {
+        scene.display=display_state();scene.dark=dark_mode();scene.captions_on=process_running(L"LiveCaptions.exe");
+        scene.keyboard_count=keyboard_layouts();scene.keyboard_label=keyboard_label(last_foreground);
+        scene.energy_on=energy_saver_on();scene.vpn_on=vpn_connected();scene.rotation_sensor=has_rotation_sensor();
+        scene.brightness_available=brightness.available();if(!scene.brightness_active)scene.brightness_level=brightness.level();
+    }
     void settings_opened() {
         scene.settings_page=Scene::SettingsPage::Main;scene.expanded.clear();scene.list_scroll=0;clear_password();
         scene.net=connectivity.snapshot();scene.updates=updates.status();
         connectivity.refresh(true);updates.refresh(updates_stale);updates_stale=false;
         scene.overlay_running=overlay_running();read_volume();
+        read_quick_states();brightness.refresh();
+        scene.quick=load_quick_layout();scene.quick_page=0;scene.quick_edit=false;scene.quick_drag=-1;scene.swipe_dx=0;
+        scene.tune_motion();scene.quick_slide.snap(0);
         SetTimer(hwnd,settings_timer,3000,nullptr);
     }
-    void settings_closed(){KillTimer(hwnd,settings_timer);scene.settings_page=Scene::SettingsPage::Main;scene.expanded.clear();clear_password();}
+    void settings_closed() {
+        KillTimer(hwnd,settings_timer);scene.settings_page=Scene::SettingsPage::Main;scene.expanded.clear();clear_password();
+        // Closing mid-drag keeps the new order (each change is already saved otherwise).
+        if(scene.quick_drag>=0)save_quick_layout(scene.quick);
+        scene.quick_drag=-1;scene.quick_edit=false;scene.swipe_dx=0;quick_press=quick_swiping=false;
+    }
+    // ---- Quick settings pages and edit mode ----
+    bool quick_press=false,quick_swiping=false; // Button down over the tiles; dragging sideways to page.
+    D2D1_POINT_2F quick_down{};int quick_down_slot=-1;
+    QuickLayout drag_before;                     // Order to restore when a tile drag is cancelled.
+    int wheel_pages=0;std::int64_t wheel_paged=0; // Wheel and touchpad deltas build up to one page.
+    void show_quick_page(long page) {
+        const long last=static_cast<long>(scene.quick.pages())-1;
+        scene.quick_page=static_cast<size_t>(std::clamp(page,0L,last));scene.tune_motion();
+        scene.quick_slide.target(static_cast<float>(scene.quick_page),now(),scene.reduced);schedule();
+    }
+    void quick_changed(const QuickLayout& before) {
+        scene.reflow(before,now());save_quick_layout(scene.quick);
+        if(scene.quick_page>=scene.quick.pages())show_quick_page(static_cast<long>(scene.quick.pages())-1);
+        schedule();
+    }
+    void set_quick_edit(bool on) {
+        if(!on&&scene.quick_drag>=0)drop_tile(true);
+        scene.quick_edit=on;scene.panel_hover=-1;schedule();
+    }
+    void wheel_page(int delta) { // Positive: next page.
+        if((wheel_pages>0)!=(delta>0))wheel_pages=0;
+        wheel_pages+=delta;
+        if(std::abs(wheel_pages)<WHEEL_DELTA||now()-wheel_paged<250)return;
+        show_quick_page(static_cast<long>(scene.quick_page)+(wheel_pages>0?1:-1));wheel_pages=0;wheel_paged=now();
+    }
+    // Ends a tile drag; the tile springs from where it was let go into its slot.
+    void drop_tile(bool keep) {
+        scene.quick_drag=-1;
+        if(!keep){const auto moved=scene.quick;scene.quick=drag_before;scene.reflow(moved,now());}
+        const auto it=std::find(scene.quick.tiles.begin(),scene.quick.tiles.end(),dragged);
+        if(it!=scene.quick.tiles.end()) {
+            const auto pos=static_cast<size_t>(it-scene.quick.tiles.begin());
+            if(pos/tiles_per_page!=scene.quick_page)show_quick_page(static_cast<long>(pos/tiles_per_page));
+            const auto home=scene.settings_tile(pos%tiles_per_page);
+            auto& dx=scene.tile_dx[Scene::ti(dragged)];auto& dy=scene.tile_dy[Scene::ti(dragged)];
+            dx.snap(scene.drag_at.x-scene.drag_grab.x-home.left);dy.snap(scene.drag_at.y-scene.drag_grab.y-home.top);
+            dx.target(0,now(),scene.reduced);dy.target(0,now(),scene.reduced);
+        }
+        if(keep)save_quick_layout(scene.quick);
+        schedule();
+    }
+    Tile dragged=Tile::Count;
+    // Pointer moves with the button down over the tiles: reorder (edit mode) or page.
+    bool quick_move(D2D1_POINT_2F point) {
+        if(!quick_press)return false;
+        const float dx=point.x-quick_down.x,dy=point.y-quick_down.y;
+        if(scene.quick_drag<0&&!quick_swiping) {
+            if(std::hypot(dx,dy)<=6)return false;
+            for(auto& spring:scene.tile_press)spring.target(1,now(),scene.reduced);
+            const size_t k=scene.quick_page*tiles_per_page+static_cast<size_t>(std::max(quick_down_slot,0));
+            if(scene.quick_edit&&quick_down_slot>=0&&k<scene.quick.tiles.size()) {
+                const auto home=scene.settings_tile(static_cast<size_t>(quick_down_slot));
+                drag_before=scene.quick;dragged=scene.quick.tiles[k];scene.quick_drag=static_cast<int>(k);
+                scene.drag_grab=D2D1::Point2F(quick_down.x-home.left,quick_down.y-home.top);
+                scene.tile_dx[Scene::ti(dragged)].snap(0);scene.tile_dy[Scene::ti(dragged)].snap(0);
+            } else if(!scene.quick_edit&&scene.quick.pages()>1&&std::abs(dx)>std::abs(dy))quick_swiping=true;
+            else {quick_press=false;return false;}
+        }
+        if(quick_swiping) { // Rubber band past the first and last page.
+            const bool edge=(dx>0&&scene.quick_page==0)||(dx<0&&scene.quick_page+1>=scene.quick.pages());
+            scene.swipe_dx=edge?dx*.3f:dx;schedule();return true;
+        }
+        scene.drag_at=point;
+        // Hovering a page dot moves the drag to that page.
+        for(size_t p=0;p<scene.quick.pages();++p)if(p!=scene.quick_page&&inside(scene.quick_dot(p),point.x,point.y))show_quick_page(static_cast<long>(p));
+        if(inside(scene.quick_area(),point.x,point.y)) {
+            const auto slot=scene.quick_slot_at(point.x-scene.drag_grab.x+50,point.y-scene.drag_grab.y+24);
+            const size_t to=std::min(scene.quick_page*tiles_per_page+slot,scene.quick.tiles.size()-1);
+            if(to!=static_cast<size_t>(scene.quick_drag)) {
+                const auto before=scene.quick;scene.quick.move(static_cast<size_t>(scene.quick_drag),to);scene.quick_drag=static_cast<int>(to);scene.reflow(before,now());
+            }
+        }
+        schedule();return true;
+    }
+    // Button released: finish a drag or swipe. False when it was a plain click.
+    bool quick_release() {
+        const bool was=quick_press;quick_press=false;
+        if(!was)return false;
+        if(scene.quick_drag>=0){drop_tile(true);return true;}
+        if(!quick_swiping)return false;
+        quick_swiping=false;const float dx=scene.swipe_dx;scene.swipe_dx=0;
+        scene.quick_slide.snap(scene.quick_slide.value()-dx/scene.page_width());
+        show_quick_page(static_cast<long>(scene.quick_page)+(dx<-40?1:dx>40?-1:0));
+        return true;
+    }
+    void quick_cancel() {
+        if(scene.quick_drag>=0)drop_tile(false);
+        if(quick_swiping){quick_swiping=false;scene.quick_slide.snap(scene.quick_slide.value()-scene.swipe_dx/scene.page_width());scene.swipe_dx=0;show_quick_page(static_cast<long>(scene.quick_page));}
+        quick_press=false;
+    }
+    // Clicks on Quick settings' main page that belong to paging or edit mode.
+    bool quick_click(float x,float y) {
+        if(scene.quick.pages()>1)for(size_t p=0;p<scene.quick.pages();++p)if(inside(scene.quick_dot(p),x,y)){show_quick_page(static_cast<long>(p));return true;}
+        if(scene.quick.tiles.empty()&&inside(scene.quick_empty_button(),x,y)){set_quick_edit(true);open_page(Scene::SettingsPage::AddTiles);return true;}
+        if(!scene.quick_edit) {
+            if(inside(scene.quick_edit_button(),x,y)){set_quick_edit(true);return true;}
+            return false;
+        }
+        for(size_t i=0;i<tiles_per_page;++i)if(scene.slot_tile(i)!=Tile::Count&&inside(scene.tile_remove(i),x,y)) {
+            const auto before=scene.quick;scene.quick.remove(scene.quick_page*tiles_per_page+i);quick_changed(before);return true;
+        }
+        if(inside(scene.quick_add_button(),x,y)){if(!scene.quick.full())open_page(Scene::SettingsPage::AddTiles);return true;}
+        if(inside(scene.quick_done_button(),x,y)){set_quick_edit(false);return true;}
+        // Tiles do nothing while editing; the volume row still works.
+        for(size_t i=0;i<tiles_per_page;++i)if(scene.slot_tile(i)!=Tile::Count&&inside(scene.settings_tile(i),x,y))return true;
+        return y>=scene.panel_rect().bottom-40;
+    }
+    void add_page_click(float x,float y) {
+        using Page=Scene::SettingsPage;
+        if(inside(scene.page_footer_link(),x,y)) {
+            const auto before=scene.quick;scene.quick=QuickLayout::defaults();scene.start_page(Page::Main,now());quick_changed(before);show_quick_page(0);return;
+        }
+        if(!inside(scene.page_list(),x,y)||scene.quick.full())return;
+        const auto hidden=scene.addable();
+        for(size_t i=0;i<hidden.size();++i)if(inside(scene.add_cell(i),x,y)) {
+            const auto before=scene.quick;scene.quick.add(hidden[i]);scene.start_page(Page::Main,now());quick_changed(before);
+            show_quick_page(static_cast<long>(scene.quick.pages())-1);return;
+        }
+    }
     void open_page(Scene::SettingsPage page) {
         scene.start_page(page,now());scene.expanded.clear();scene.list_scroll=0;clear_password();
         if(page==Scene::SettingsPage::Wifi){connectivity.scan();connectivity.refresh(true);}
@@ -2647,12 +3023,23 @@ public:
     }
     // Instant capture: NVIDIA's "save the last minutes" hotkey (Alt+F10), sent
     // once focus is back on the game.
-    void instant_capture(){dismiss_panel(true);SetTimer(hwnd,capture_timer,180,nullptr);}
+    // Live captions (Win+Ctrl+L) and Cast (Win+K) are Windows shortcuts too, sent
+    // the same way so they reach the shell rather than our panel.
+    void send_shortcut(std::vector<WORD> codes){pending_keys=std::move(codes);dismiss_panel(true);SetTimer(hwnd,capture_timer,180,nullptr);}
+    void instant_capture(){send_shortcut({VK_MENU,VK_F10});}
     void send_capture_keys() {
-        KillTimer(hwnd,capture_timer);
-        INPUT keys[4]{};const WORD codes[4]={VK_MENU,VK_F10,VK_F10,VK_MENU};
-        for(int i=0;i<4;++i){keys[i].type=INPUT_KEYBOARD;keys[i].ki.wVk=codes[i];keys[i].ki.wScan=static_cast<WORD>(MapVirtualKeyW(codes[i],MAPVK_VK_TO_VSC));keys[i].ki.dwFlags=i>=2?KEYEVENTF_KEYUP:0;}
-        SendInput(4,keys,sizeof(INPUT));scene.capture_sent=GetTickCount64();schedule();
+        KillTimer(hwnd,capture_timer);if(pending_keys.empty())return;
+        // Press in order, release in reverse.
+        std::vector<INPUT> keys(pending_keys.size()*2);
+        for(size_t i=0;i<keys.size();++i) {
+            const bool up=i>=pending_keys.size();const WORD code=up?pending_keys[keys.size()-1-i]:pending_keys[i];
+            keys[i].type=INPUT_KEYBOARD;keys[i].ki.wVk=code;keys[i].ki.wScan=static_cast<WORD>(MapVirtualKeyW(code,MAPVK_VK_TO_VSC));
+            keys[i].ki.dwFlags=(up?KEYEVENTF_KEYUP:0)|(code==VK_LWIN?KEYEVENTF_EXTENDEDKEY:0);
+        }
+        const bool capture=pending_keys==std::vector<WORD>{VK_MENU,VK_F10};pending_keys.clear();
+        SendInput(static_cast<UINT>(keys.size()),keys.data(),sizeof(INPUT));
+        if(capture)scene.capture_sent=GetTickCount64();
+        schedule();
     }
     void timer_start(std::int64_t ms) {
         stop_alarm();scene.timer_duration=ms;scene.timer_end=GetTickCount64()+static_cast<ULONGLONG>(ms);
@@ -2689,18 +3076,56 @@ public:
         catch(HRESULT error){log_error("alarm",error);}
         schedule();
     }
-    void settings_tile_click(size_t i,bool arrow) {
+    void settings_tile_click(Tile tile,bool arrow) {
         using Page=Scene::SettingsPage;
-        if(!arrow)scene.tile_motion[i]={now(),true}; // The tile's icon reacts to the click.
-        switch(i) {
-        case 0:if(arrow)open_page(Page::Wifi);else if(scene.net.wifi_present){scene.net.wifi_on=!scene.net.wifi_on;connectivity.set_wifi(scene.net.wifi_on);}break;
-        case 1:if(arrow)open_page(Page::Bluetooth);else if(scene.net.bluetooth_present){scene.net.bluetooth_on=!scene.net.bluetooth_on;connectivity.set_bluetooth(scene.net.bluetooth_on);}break;
-        case 2:if(volume.mic_available()){volume.set_mic_muted(!volume.mic_muted());read_volume();}break;
-        case 3:instant_capture();return;
-        case 4:if(arrow)open_page(Page::Timer);else timer_primary();break;
-        default:updates_stale=true;launch(L"ms-settings:windowsupdate-action");return;
+        if(!arrow)scene.tile_motion[Scene::ti(tile)]={now(),true}; // The tile's icon reacts to the click.
+        switch(tile) {
+        case Tile::Wifi:if(arrow)open_page(Page::Wifi);else if(scene.net.wifi_present){scene.net.wifi_on=!scene.net.wifi_on;connectivity.set_wifi(scene.net.wifi_on);}break;
+        case Tile::Bluetooth:if(arrow)open_page(Page::Bluetooth);else if(scene.net.bluetooth_present){scene.net.bluetooth_on=!scene.net.bluetooth_on;connectivity.set_bluetooth(scene.net.bluetooth_on);}break;
+        case Tile::Mic:if(volume.mic_available()){volume.set_mic_muted(!volume.mic_muted());read_volume();}break;
+        case Tile::Capture:instant_capture();return;
+        case Tile::Timer:if(arrow)open_page(Page::Timer);else timer_primary();break;
+        case Tile::Updates:updates_stale=true;launch(L"ms-settings:windowsupdate-action");return;
+        case Tile::Project:open_page(Page::Project);return;
+        case Tile::Airplane:airplane(!scene.airplane_on());break;
+        case Tile::DarkMode:set_dark_mode(!scene.dark);scene.dark=dark_mode();break;
+        case Tile::Captions:scene.captions_on=!scene.captions_on;send_shortcut({VK_LWIN,VK_CONTROL,'L'});return;
+        case Tile::Cast:send_shortcut({VK_LWIN,'K'});return;
+        case Tile::Keyboard:if(scene.keyboard_count>1)scene.keyboard_label=next_keyboard_layout(last_foreground);break;
+        default:if(const auto page=settings_uri(tile))open_settings(page);return; // Tiles that open their Settings page.
         }
         schedule();
+    }
+    // Windows has no public toggle for these; see docs/decisions.md.
+    static const wchar_t* settings_uri(Tile tile) {
+        switch(tile) {
+        case Tile::Hotspot:return L"ms-settings:network-mobilehotspot";
+        case Tile::EnergySaver:return L"ms-settings:batterysaver";
+        case Tile::Vpn:return L"ms-settings:network-vpn";
+        case Tile::NightLight:return L"ms-settings:nightlight";
+        case Tile::Nearby:return L"ms-settings:crossdevice";
+        case Tile::Accessibility:return L"ms-settings:easeofaccess";
+        case Tile::ColorFilters:return L"ms-settings:easeofaccess-colorfilter";
+        case Tile::Rotation:return L"ms-settings:display";
+        case Tile::DoNotDisturb:return L"ms-settings:notifications";
+        default:return nullptr;
+        }
+    }
+    // Airplane mode without Windows' private flag: switch off the radios we can
+    // reach and remember which, so turning it off restores only those.
+    void airplane(bool on) {
+        auto& net=scene.net;
+        if(on) {
+            airplane_wifi=net.wifi_present&&net.wifi_on;airplane_bluetooth=net.bluetooth_present&&net.bluetooth_on;
+            if(airplane_wifi){net.wifi_on=false;connectivity.set_wifi(false);}
+            if(airplane_bluetooth){net.bluetooth_on=false;connectivity.set_bluetooth(false);}
+            return;
+        }
+        // Nothing remembered (turned off elsewhere, or the dock restarted): bring Wi-Fi back.
+        if(!airplane_wifi&&!airplane_bluetooth)airplane_wifi=net.wifi_present;
+        if(airplane_wifi&&net.wifi_present){net.wifi_on=true;connectivity.set_wifi(true);}
+        if(airplane_bluetooth&&net.bluetooth_present){net.bluetooth_on=true;connectivity.set_bluetooth(true);}
+        airplane_wifi=airplane_bluetooth=false;
     }
     void network_click(const Scene::ListRow& row,float x,float y) {
         const auto network=scene.net.networks[row.index];
@@ -2751,6 +3176,14 @@ public:
         using Page=Scene::SettingsPage;
         if(inside(scene.page_back(),x,y)){scene.start_page(Page::Main,now());scene.expanded.clear();clear_password();schedule();return;}
         if(scene.settings_page==Page::Timer){timer_page_click(x,y);return;}
+        if(scene.settings_page==Page::AddTiles){add_page_click(x,y);schedule();return;}
+        if(scene.settings_page==Page::Project) {
+            if(inside(scene.page_footer_link(),x,y)||inside(scene.page_footer_action(),x,y)){open_settings(L"ms-settings:display");return;}
+            if(scene.display.displays<2)return;
+            // Close first: the screens (and the dock with them) are about to move.
+            for(size_t i=0;i<std::size(Scene::project_modes);++i)if(inside(scene.project_cell(i),x,y)){dismiss_panel(true);set_display_mode(Scene::project_modes[i]);return;}
+            return;
+        }
         const bool wifi=scene.settings_page==Page::Wifi;
         if(inside(scene.page_switch(),x,y)) {
             if(wifi&&scene.net.wifi_present){scene.net.wifi_on=!scene.net.wifi_on;connectivity.set_wifi(scene.net.wifi_on);if(scene.net.wifi_on)connectivity.scan();}
@@ -2798,6 +3231,17 @@ public:
     void volume_from(float x) {
         const auto track=scene.volume_track();wave_volume();
         show_volume((x-track.left)/(track.right-track.left));
+    }
+    void show_brightness(int percent) {
+        scene.brightness_level=std::clamp(percent,0,100);
+        brightness.set(scene.brightness_level);schedule();
+    }
+    void brightness_from(float x) {
+        const auto track=scene.brightness_track();
+        show_brightness(static_cast<int>(std::lround(100*(x-track.left)/(track.right-track.left))));
+    }
+    bool over_brightness(D2D1_POINT_2F pt) const {
+        return scene.brightness_available&&scene.settings_page==Scene::SettingsPage::Main&&inside(scene.brightness_hit(),pt.x,pt.y);
     }
     // Panel-space point (undoes the flyout reveal scale), as click() does.
     D2D1_POINT_2F panel_point(float x,float y) const {
@@ -3432,7 +3876,7 @@ public:
                 add_entry(sections[0],1,L"Adjust date and time",L'\xE787');add_entry(sections[0],2,L"Notification settings",L'\xEA8F');
                 add_entry(sections[1],3,L"Show next prayer on clock",prayer_settings.clock?L'\xE73E':L'\xE916');
                 add_entry(sections[1],4,L"Prayer reminders",prayer_settings.reminders?L'\xE73E':L'\xEA8F');
-                add_entry(sections[1],5,L"Open masjid website",L'\xE774');
+                if(prayer_settings.source==PrayerSource::Website&&!prayer_settings.website.empty())add_entry(sections[1],5,L"Open masjid website",L'\xE774');
             } else {add_entry(sections[0],1,L"Network settings",L'\xE701');add_entry(sections[0],2,L"Sound settings",L'\xE767');}
             glass_menu(std::move(sections),clock?scene.clock_rect():scene.quick_settings_rect(),keyboard,[this,clock](UINT id) {
                 if(id==1)launch(clock?L"ms-settings:dateandtime":L"ms-settings:network");
@@ -3756,11 +4200,12 @@ public:
                     launcher_click(x,y);
                 } else if(scene.panel==Panel::Settings) {
                     if(scene.settings_page!=Scene::SettingsPage::Main){settings_page_click(x,y);return;}
-                    for(size_t i=0;i<6;++i)if(inside(scene.settings_tile(i),x,y)){settings_tile_click(i,Scene::split_tile(i)&&inside(scene.tile_arrow(i),x,y));return;}
+                    if(quick_click(x,y))return;
+                    for(size_t i=0;i<tiles_per_page;++i)if(const auto tile=scene.slot_tile(i);tile!=Tile::Count&&inside(scene.settings_tile(i),x,y)){settings_tile_click(tile,Scene::split_tile(tile)&&inside(scene.tile_arrow(i),x,y));return;}
                     if(inside(D2D1::RectF(r.right-46,r.top+245,r.right-18,r.top+277),x,y))launch(L"ms-settings:sound");
                     if(volume.available()&&inside(scene.volume_mute_rect(),x,y)){volume.set_muted(!volume.muted());read_volume();schedule();}
                     if(inside(D2D1::RectF(r.right-45,r.bottom-36,r.right-16,r.bottom-5),x,y))launch(L"ms-settings:");
-                    if(!scene.recovery_entry.empty() && inside(D2D1::RectF(r.left+20,r.bottom-33,r.right-55,r.bottom-8),x,y)) {
+                    if(!scene.recovery_entry.empty() && inside(D2D1::RectF(r.left+20,r.bottom-33,r.right-88,r.bottom-8),x,y)) {
                         if(scene.desktop) {return_to_windows();return;}
                         const auto result=reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd,L"open",scene.recovery_entry.c_str(),nullptr,nullptr,SW_SHOWNORMAL));
                         if(result>32) { scene.machine.recover(now()); PostMessageW(hwnd,WM_CLOSE,0,0); }
@@ -3960,7 +4405,7 @@ public:
         }
         switch(msg) {
         case WM_CREATE: {
-            scene.initialize(); update_preferences(); dpi=static_cast<float>(GetDpiForWindow(hwnd));
+            scene.initialize(); scene.quick=load_quick_layout(); update_preferences(); dpi=static_cast<float>(GetDpiForWindow(hwnd));
             if(glass_mode)glass.attach(hwnd,scene.factory.get());
             wchar_t module[32768]{}; GetModuleFileNameW(nullptr,module,32768);
             auto parent=std::filesystem::path(module).parent_path();
@@ -3987,7 +4432,7 @@ public:
             arm_clock();
             media.start(hwnd);
             volume.start(hwnd);read_volume();
-            connectivity.start(hwnd);updates.start(hwnd);launcher_index.start(hwnd);file_search.start(hwnd);
+            connectivity.start(hwnd);updates.start(hwnd);brightness.start(hwnd);launcher_index.start(hwnd);file_search.start(hwnd);
             if(live_dock){const bool on=load_windows_key_setting();windows_key.enable(on);windows_key.start(hwnd);scene.windows_key_on=on;}
             reserve_bar(dock_settings.style==DockSettings::Style::Bar&&!dock_settings.bar_autohide);
             windows_pin_ids=pin_ids(windows_pins());pin_watch.start(hwnd,pins_folder_message,taskbar_pins_folder());
@@ -4061,8 +4506,20 @@ public:
         case media_changed_message:scene.media=media.snapshot();schedule();return 0;
         case volume_changed_message:if(w==1)volume.refresh();read_volume();schedule();return 0;
         case connectivity_changed_message:scene.net=connectivity.snapshot();schedule();return 0;
+        case brightness_changed_message:
+            scene.brightness_available=brightness.available();if(!scene.brightness_active)scene.brightness_level=brightness.level();
+            schedule();return 0;
         case updates_changed_message:scene.updates=updates.status();schedule();return 0;
-        case prayer_times_message:prayer_tick();customize.prayer_updated();return 0;
+        case prayer_times_message: {
+            // Following the device: keep the latest fix (the worker never writes the registry).
+            const auto located=prayers.snapshot().located;
+            if(prayer_settings.source==PrayerSource::Location&&prayer_settings.locate==LocateMode::Device&&located.located&&!located.same_location(prayer_settings)) {
+                prayer_settings.latitude=located.latitude;prayer_settings.longitude=located.longitude;prayer_settings.located=true;
+                prayer_settings.place=located.place;prayer_settings.country=located.country;prayer_settings.located_day=located.located_day;
+                save_prayer_settings(prayer_settings);customize.prayer_location(prayer_settings);
+            }
+            prayer_tick();customize.prayer_updated();return 0;
+        }
         case app_update_message:customize.prayer_updated();return 0; // Redraws the settings window.
         case windows_key_message:windows_key_pressed();return 0;
         case file_search_message:
@@ -4120,11 +4577,13 @@ public:
             else {const auto r=reinterpret_cast<RECT*>(l); SetWindowPos(hwnd,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);} return 0;
         }
         case WM_SETTINGCHANGE: update_preferences(); refresh_clock(); schedule(); return 0;
-        case WM_TIMECHANGE: refresh_clock(); return 0;
-        case WM_POWERBROADCAST: if(w==PBT_APMRESUMEAUTOMATIC||w==PBT_APMRESUMESUSPEND)refresh_clock(); return TRUE;
+        case WM_TIMECHANGE: refresh_clock(); prayers.refresh(); return 0;
+        case WM_POWERBROADCAST: if(w==PBT_APMRESUMEAUTOMATIC||w==PBT_APMRESUMESUSPEND){refresh_clock();prayers.refresh();} return TRUE;
         case WM_MOUSEMOVE: {
             const float x=GET_X_LPARAM(l)*96.0f/dpi,raw_y=GET_Y_LPARAM(l)*96.0f/dpi,y=raw_y-(live_dock?visibility.offset():0);
             if(scene.slider_active){volume_from(panel_point(x,y).x);return 0;}
+            if(scene.brightness_active){brightness_from(panel_point(x,y).x);return 0;}
+            if(quick_move(panel_point(x,y)))return 0;
             if(drag_candidate>=0&&scene.dragging<0&&std::abs(x-drag_down_x)>6)begin_drag();
             if(scene.dragging>=0){scene.pointer_x=x;scene.pointer_y=y;scene.drag_x=x;update_drag();schedule();return 0;}
             if(const int slot=scene.hover_slot(x,y);slot!=scene.hovered)hover_changed(slot);
@@ -4148,13 +4607,21 @@ public:
                 const auto point=panel_point(x,y);
                 if(inside(scene.volume_hit(),point.x,point.y)){scene.slider_active=true;volume_from(point.x);return 0;}
             }
+            if(scene.panel==Panel::Settings&&inside(scene.panel_rect(),x,y)&&over_brightness(panel_point(x,y))) {
+                scene.brightness_active=true;brightness_from(panel_point(x,y).x);return 0;
+            }
             if(scene.panel==Panel::Launcher&&inside(scene.panel_rect(),x,y)&&scene.power_pending<0) {
                 const auto point=panel_point(x,y);
                 for(size_t i=1;i<5;++i)if(inside(scene.power_button(i),point.x,point.y)){scene.power_holding=static_cast<int>(i);scene.power_hold_start=now();schedule();}
             }
             if(scene.panel==Panel::Settings&&scene.settings_page==Scene::SettingsPage::Main&&inside(scene.panel_rect(),x,y)) {
                 const auto point=panel_point(x,y);scene.tune_motion();
-                for(size_t i=0;i<6;++i)if(inside(scene.settings_tile(i),point.x,point.y)){scene.tile_press[i].target(.95f,now(),scene.reduced);schedule();}
+                quick_press=inside(scene.quick_area(),point.x,point.y)&&!scene.quick.tiles.empty();quick_swiping=false;quick_down=point;quick_down_slot=-1;
+                for(size_t i=0;i<tiles_per_page;++i)if(const auto tile=scene.slot_tile(i);tile!=Tile::Count&&inside(scene.settings_tile(i),point.x,point.y)) {
+                    if(scene.quick_edit&&inside(scene.tile_remove(i),point.x,point.y))continue;
+                    quick_down_slot=static_cast<int>(i);
+                    if(!scene.quick_edit){scene.tile_press[Scene::ti(tile)].target(.95f,now(),scene.reduced);schedule();}
+                }
             }
             scene.press_at(x,y);
             // Pinned apps can be dragged to a new position.
@@ -4166,6 +4633,8 @@ public:
             for(auto& spring:scene.tile_press)spring.target(1,now(),scene.reduced);
             if(scene.power_holding>=0){scene.power_holding=-1;schedule();} // Released early: nothing happens.
             if(scene.slider_active){scene.slider_active=false;volume_settle_until=now()+400;ReleaseCapture();schedule();return 0;}
+            if(scene.brightness_active){scene.brightness_active=false;ReleaseCapture();schedule();return 0;}
+            if(quick_release()){ReleaseCapture();return 0;}
             if(scene.dragging>=0){end_drag(true);ReleaseCapture();return 0;}
             drag_candidate=-1;
             scene.clear_press();ReleaseCapture();if(!drag_moved&&(!live_dock||visibility.wanted()))click(GET_X_LPARAM(l)*96.0f/dpi,GET_Y_LPARAM(l)*96.0f/dpi-(live_dock?visibility.offset():0));
@@ -4174,7 +4643,7 @@ public:
         case WM_CAPTURECHANGED:
             if(reinterpret_cast<HWND>(l)!=hwnd) {
                 if(scene.dragging>=0)end_drag(false);
-                scene.slider_active=false;drag_candidate=-1;
+                quick_cancel();scene.slider_active=scene.brightness_active=false;drag_candidate=-1;
             }
             scene.clear_press();schedule();return 0;
         case WM_CONTEXTMENU: {
@@ -4193,6 +4662,11 @@ public:
                 if(keyboard){show_actions(true);return 0;}
                 if(inside(scene.panel_rect(),x,y)){launcher_context(panel_point(x,y));return 0;}
             }
+            // Right-click (or the menu key) in Quick settings edits the tiles, as in Windows.
+            if(scene.panel==Panel::Settings&&(keyboard||inside(scene.panel_rect(),x,y))) {
+                if(scene.settings_page==Scene::SettingsPage::Main&&!scene.quick_edit)set_quick_edit(true);
+                return 0;
+            }
             const auto hit=scene.tray_hit(x,y);
             if(hit>=0)activate_tray(scene.tray_items[static_cast<size_t>(hit)].key,true,point,false,keyboard);
             else if(scene.desktop)control_menu(point,x,y,!keyboard&&(GetKeyState(VK_SHIFT)&0x8000),keyboard);return 0;
@@ -4210,11 +4684,25 @@ public:
                 const auto area=scene.page_list();
                 scene.list_scroll=std::clamp(scene.list_scroll-notches*52,0.0f,std::max(0.0f,scene.list_extent()-(area.bottom-area.top)));schedule();return 0;
             }
+            if(scene.panel==Panel::Settings&&scene.settings_page==Scene::SettingsPage::AddTiles&&inside(scene.panel_rect(),x,y)) {
+                const auto area=scene.page_list();
+                scene.list_scroll=std::clamp(scene.list_scroll-notches*42,0.0f,std::max(0.0f,scene.add_extent()-(area.bottom-area.top)));schedule();return 0;
+            }
+            if(scene.panel==Panel::Settings&&scene.settings_page==Scene::SettingsPage::Main&&scene.quick.pages()>1&&inside(scene.panel_rect(),x,y)) {
+                if(const auto pt=panel_point(x,y);inside(scene.quick_area(),pt.x,pt.y)){wheel_page(-GET_WHEEL_DELTA_WPARAM(w));return 0;}
+            }
+            if(scene.panel==Panel::Settings&&inside(scene.panel_rect(),x,y)&&over_brightness(panel_point(x,y))){show_brightness(scene.brightness_level+static_cast<int>(std::lround(5*notches)));return 0;}
             const bool over_sound=scene.machine.progress()>.85f&&inside(scene.quick_settings_rect(),x,y)&&x>=(scene.quick_settings_rect().left+scene.quick_settings_rect().right)/2;
             const bool over_slider=scene.panel==Panel::Settings&&scene.settings_page==Scene::SettingsPage::Main&&inside(scene.panel_rect(),x,y)&&[&]{const auto pt=panel_point(x,y);const auto row=scene.volume_hit();return pt.y>=row.top-14&&pt.y<=row.bottom+14;}();
             if(over_sound||over_slider){adjust_volume(.02f*notches);return 0;}
         }
         if(scene.panel==Panel::Tray&&scene.native_tray&&scene.tray_items.size()>30){if(GET_WHEEL_DELTA_WPARAM(w)<0&&scene.tray_scroll+30<scene.tray_items.size())scene.tray_scroll+=5;else if(GET_WHEEL_DELTA_WPARAM(w)>0&&scene.tray_scroll>=5)scene.tray_scroll-=5;schedule();}return 0;
+        case WM_MOUSEHWHEEL: { // Touchpad two-finger swipe: pages Quick settings.
+            POINT point{GET_X_LPARAM(l),GET_Y_LPARAM(l)};ScreenToClient(hwnd,&point);
+            const float x=point.x*96.0f/dpi,y=point.y*96.0f/dpi-(live_dock?visibility.offset():0);
+            if(scene.panel==Panel::Settings&&scene.settings_page==Scene::SettingsPage::Main&&scene.quick.pages()>1&&inside(scene.panel_rect(),x,y))wheel_page(GET_WHEEL_DELTA_WPARAM(w));
+            return 0;
+        }
         case WM_CHAR:
             if(const auto network=password_network()) {
                 if(w==VK_BACK){if(!scene.password.empty()){scene.password.back()=0;scene.password.pop_back();}}
@@ -4248,6 +4736,12 @@ public:
                 if((w==VK_RETURN||w==VK_SPACE||(w==VK_F10&&(GetKeyState(VK_SHIFT)&0x8000)))&&scene.tray_focus>=0){const auto r=scene.tray_tile(static_cast<size_t>(scene.tray_focus)-scene.tray_scroll);POINT point{static_cast<LONG>(std::lround((r.left+r.right)*dpi/192)),static_cast<LONG>(std::lround((r.top+r.bottom)*dpi/192))};ClientToScreen(hwnd,&point);activate_tray(scene.tray_items[static_cast<size_t>(scene.tray_focus)].key,w==VK_F10,point,false,true);return 0;}
             }
             if(w==VK_ESCAPE&&scene.dragging>=0){end_drag(false);ReleaseCapture();return 0;}
+            if(w==VK_ESCAPE&&scene.panel==Panel::Settings&&(quick_press||scene.quick_drag>=0)){quick_cancel();ReleaseCapture();schedule();return 0;}
+            if(scene.panel==Panel::Settings&&scene.settings_page==Scene::SettingsPage::Main) {
+                const bool ctrl=(GetKeyState(VK_CONTROL)&0x8000)!=0;
+                if(w==VK_ESCAPE&&scene.quick_edit){set_quick_edit(false);return 0;}
+                if((ctrl&&(w==VK_LEFT||w==VK_RIGHT))||w==VK_PRIOR||w==VK_NEXT){show_quick_page(static_cast<long>(scene.quick_page)+(w==VK_RIGHT||w==VK_NEXT?1:-1));return 0;}
+            }
             if(w==VK_ESCAPE&&scene.panel==Panel::Settings&&scene.settings_page!=Scene::SettingsPage::Main){scene.start_page(Scene::SettingsPage::Main,now());scene.expanded.clear();clear_password();schedule();return 0;}
             if(password_network())return 0; // Keys become WM_CHAR for the security key.
             if(scene.panel==Panel::Launcher&&scene.desktop) {
@@ -4390,7 +4884,7 @@ public:
             KillTimer(hwnd,hover_timer);KillTimer(hwnd,previews_timer);previews.close(false);
             volume.stop();if(shell_hook)DeregisterShellHookWindow(hwnd);
             KillTimer(hwnd,settings_timer);KillTimer(hwnd,countdown_timer);KillTimer(hwnd,capture_timer);stop_alarm();alarm_card.close(false);
-            connectivity.stop();updates.stop();customize.close();app_updater.stop();reserve_bar(false);launcher_index.stop();file_search.stop();windows_key.stop();pin_watch.stop();KillTimer(hwnd,pins_timer);
+            connectivity.stop();updates.stop();brightness.stop();customize.close();app_updater.stop();reserve_bar(false);launcher_index.stop();file_search.stop();windows_key.stop();pin_watch.stop();KillTimer(hwnd,pins_timer);
             prayer_toast.close();prayers.stop();
             media.stop();
             calendar.close(false);
@@ -4497,7 +4991,15 @@ int save_preview_snapshot(const std::wstring& path, bool expanded,int panel) {
         ComPtr<ID2D1RenderTarget> rt; check(scene.factory->CreateWicBitmapRenderTarget(bitmap.get(),D2D1::RenderTargetProperties(),rt.put()));
         scene.bind(rt.get()); scene.accept(collect_inventory(GetCurrentProcessId()),true);
         if(expanded) { scene.machine.reduced_motion(true); scene.machine.hold(Hold::Keyboard,true,0); }
+        if(panel==1||(panel>=26&&panel<=28)){scene.brightness_available=true;scene.brightness_level=70;} // Fixed sample, not this PC's panel.
         if(panel==1)scene.panel=Panel::Settings;else if(panel==2)scene.panel=Panel::Tray;
+        else if(panel>=26&&panel<=28) { // Quick settings: edit mode, second page, Add tiles.
+            scene.panel=Panel::Settings;
+            scene.dark=true;scene.display={2,DisplayMode::Extend};scene.keyboard_count=2;scene.keyboard_label=L"ENG";
+            if(panel==26)scene.quick_edit=true;
+            if(panel==27){scene.quick.tiles.clear();for(size_t i=0;i<Scene::tile_count;++i)scene.quick.add(static_cast<Tile>(i));scene.quick_page=std::min<size_t>(1,scene.quick.pages()-1);}
+            if(panel==28){scene.quick_edit=true;scene.quick.remove(1);scene.quick.remove(2);scene.settings_page=Scene::SettingsPage::AddTiles;}
+        }
         else if(panel==4){const auto button=scene.desktop_button_rect();scene.pointer_x=(button.left+button.right)/2;scene.pointer_y=(button.top+button.bottom)/2;}
         else if(panel==5){const auto button=scene.launcher_rect();scene.pointer_x=(button.left+button.right)/2;scene.pointer_y=(button.top+button.bottom)/2;}
         else if(panel==6){scene.launcher_pulse.start(0);scene.launcher_pulse.tick(60);const auto button=scene.launcher_rect();scene.pointer_x=(button.left+button.right)/2;scene.pointer_y=(button.top+button.bottom)/2;}

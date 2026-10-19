@@ -1,5 +1,6 @@
 #pragma once
 #include "rendering/theme.h"
+#include "taskbar/quick_tiles.h"
 #include <windows.h>
 #include <algorithm>
 #include <cmath>
@@ -63,6 +64,20 @@ inline void save_dock_settings(const DockSettings& s) {
     write_dword(L"BarAutoHide",s.bar_autohide);write_dword(L"BarLeft",s.bar_left);
     write_dword(L"IconSize",static_cast<DWORD>(s.icon));write_dword(L"Magnify",static_cast<DWORD>(s.magnify));write_dword(L"HideDelay",static_cast<DWORD>(s.hide_delay));
     write_dword(L"Motion",static_cast<DWORD>(s.motion));write_dword(L"Media",s.media);write_dword(L"Date",s.date);write_dword(L"Clock24",s.clock24);
+}
+// Quick settings tile order (REG_SZ "QuickTiles", comma-separated keys). A missing
+// value is the default layout; an empty one is a layout with every tile removed.
+inline QuickLayout load_quick_layout() {
+    DWORD size=0;
+    if(RegGetValueW(HKEY_CURRENT_USER,dock_settings_key,L"QuickTiles",RRF_RT_REG_SZ,nullptr,nullptr,&size)!=ERROR_SUCCESS||size>4096)return QuickLayout::defaults();
+    std::wstring text(size/sizeof(wchar_t)+1,L'\0');size=static_cast<DWORD>(text.size()*sizeof(wchar_t));
+    if(RegGetValueW(HKEY_CURRENT_USER,dock_settings_key,L"QuickTiles",RRF_RT_REG_SZ,nullptr,text.data(),&size)!=ERROR_SUCCESS)return QuickLayout::defaults();
+    text.resize(wcsnlen(text.c_str(),text.size()));
+    return QuickLayout::parse(text);
+}
+inline void save_quick_layout(const QuickLayout& layout) {
+    const auto text=layout.serialize();
+    RegSetKeyValueW(HKEY_CURRENT_USER,dock_settings_key,L"QuickTiles",REG_SZ,text.c_str(),static_cast<DWORD>((text.size()+1)*sizeof(wchar_t)));
 }
 // Resets the appearance fields only (Customize > About > Reset appearance).
 inline DockSettings default_appearance(DockSettings s) {

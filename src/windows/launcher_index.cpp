@@ -154,8 +154,11 @@ bool set_dark_mode(bool dark) {
     const DWORD light=dark?0:1;bool ok=true;
     for(const auto name:{L"AppsUseLightTheme",L"SystemUsesLightTheme"})
         ok&=RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",name,REG_DWORD,&light,sizeof(light))==ERROR_SUCCESS;
-    DWORD_PTR result=0;
-    SendMessageTimeoutW(HWND_BROADCAST,WM_SETTINGCHANGE,0,reinterpret_cast<LPARAM>(L"ImmersiveColorSet"),SMTO_ABORTIFHUNG,200,&result);
+    // A hung top-level window would stall the broadcast, so it never runs on the GUI thread.
+    std::thread([]{
+        DWORD_PTR result=0;
+        SendMessageTimeoutW(HWND_BROADCAST,WM_SETTINGCHANGE,0,reinterpret_cast<LPARAM>(L"ImmersiveColorSet"),SMTO_ABORTIFHUNG,200,&result);
+    }).detach();
     return ok;
 }
 bool copy_text(HWND owner,const std::wstring& text) {
