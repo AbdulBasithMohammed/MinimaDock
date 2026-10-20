@@ -19,7 +19,9 @@ void check(HRESULT hr){if(FAILED(hr))throw hr;}
 bool inside(D2D1_RECT_F r,float x,float y){return x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom;}
 }
 struct WindowPreviews::Impl {
-    struct Item {HWND window=nullptr;std::wstring title;HTHUMBNAIL thumbnail=nullptr;SIZE source{};bool iconic=false;};
+    struct Member {HWND window=nullptr;RECT frame{};HTHUMBNAIL thumbnail=nullptr;SIZE source{};bool iconic=false;std::wstring title;};
+    // A window tile, or a snap group tile (`members` set; `window` is this app's member).
+    struct Item {HWND window=nullptr;std::wstring title;HTHUMBNAIL thumbnail=nullptr;SIZE source{};bool iconic=false;std::vector<Member> members;RECT area{};};
     HWND hwnd=nullptr,owner=nullptr;
     GlassHost host;
     GlassPainter painter;
@@ -79,22 +81,55 @@ struct WindowPreviews::Impl {
            FAILED(converted->Initialize(scaled.get(),GUID_WICPixelFormat32bppPBGRA,WICBitmapDitherTypeNone,nullptr,0,WICBitmapPaletteTypeCustom)))return result;
         target->CreateBitmapFromWicBitmap(converted.get(),nullptr,result.put());return result;
     }
-    void unregister(){for(auto& item:items)if(item.thumbnail){DwmUnregisterThumbnail(item.thumbnail);item.thumbnail=nullptr;}}
-    void rebuild(const std::vector<HWND>& windows) {
+    void unregister() {
+        for(auto& item:items) {
+            if(item.thumbnail){DwmUnregisterThumbnail(item.thumbnail);item.thumbnail=nullptr;}
+            for(auto& member:item.members)if(member.thumbnail){DwmUnregisterThumbnail(member.thumbnail);member.thumbnail=nullptr;}
+        }
+    }
+    void rebuild(const std::vector<HWND>& windows,const std::vector<SnapGroup>& groups) {
         unregister();items.clear();
+        const auto title_of=[&](HWND window){wchar_t title[256]{};GetWindowTextW(window,title,256);return std::wstring(title[0]?title:name.c_str());};
         for(const auto window:windows) {
             if(items.size()>=max_tiles)break;
             if(!IsWindow(window))continue;
-            Item item;item.window=window;wchar_t title[256]{};GetWindowTextW(window,title,256);item.title=title[0]?title:name;
+            Item item;item.window=window;item.title=title_of(window);
+            items.push_back(std::move(item));
+        }
+        for(const auto& group:groups) {
+            if(items.size()>=max_tiles)break;
+            Item item;item.title=group.label;item.area=group.area;
+            for(size_t i=0;i<group.windows.size()&&i<group.frames.size();++i) {
+                if(!IsWindow(group.windows[i]))continue;
+                if(!item.window&&std::find(windows.begin(),windows.end(),group.windows[i])!=windows.end())item.window=group.windows[i];
+                Member member;member.window=group.windows[i];member.frame=group.frames[i];member.title=title_of(group.windows[i]);
+                item.members.push_back(std::move(member));
+            }
+            if(item.members.size()<2)continue;
+            if(!item.window)item.window=item.members.front().window;
             items.push_back(std::move(item));
         }
     }
+    void register_one(HWND window,HTHUMBNAIL& thumbnail,SIZE& source,bool& iconic) {
+        iconic=IsIconic(window)!=FALSE;
+        if(thumbnail||iconic)return;
+        if(SUCCEEDED(DwmRegisterThumbnail(hwnd,window,&thumbnail))&&FAILED(DwmQueryThumbnailSourceSize(thumbnail,&source))){DwmUnregisterThumbnail(thumbnail);thumbnail=nullptr;}
+    }
     void register_thumbnails() {
         for(auto& item:items) {
-            item.iconic=IsIconic(item.window)!=FALSE;
-            if(item.thumbnail||item.iconic)continue;
-            if(SUCCEEDED(DwmRegisterThumbnail(hwnd,item.window,&item.thumbnail))&&FAILED(DwmQueryThumbnailSourceSize(item.thumbnail,&item.source))){DwmUnregisterThumbnail(item.thumbnail);item.thumbnail=nullptr;}
+            if(item.members.empty()){register_one(item.window,item.thumbnail,item.source,item.iconic);continue;}
+            for(auto& member:item.members)register_one(member.window,member.thumbnail,member.source,member.iconic);
         }
+    }
+    // Where each snapped window sits inside a group tile's frame: the shared
+    // work area aspect-fitted into the frame, each window at its own place.
+    D2D1_RECT_F member_rect(const Item& item,size_t m,D2D1_RECT_F area) const {
+        const auto& a=item.area;const auto& f=item.members[m].frame;
+        const float aw=static_cast<float>(std::max<LONG>(1,a.right-a.left)),ah=static_cast<float>(std::max<LONG>(1,a.bottom-a.top));
+        const float zoom=std::min((area.right-area.left)/aw,(area.bottom-area.top)/ah);
+        const float x0=(area.left+area.right)/2-aw*zoom/2,y0=(area.top+area.bottom)/2-ah*zoom/2;
+        const float gap_dip=1.5f*fit;
+        return D2D1::RectF(x0+(f.left-a.left)*zoom+gap_dip,y0+(f.top-a.top)*zoom+gap_dip,x0+(f.right-a.left)*zoom-gap_dip,y0+(f.bottom-a.top)*zoom-gap_dip);
     }
     void place(RECT anchor,LONG dock_top) {
         MONITORINFO info{sizeof(info),{},{},0};GetMonitorInfoW(MonitorFromRect(&anchor,MONITOR_DEFAULTTONEAREST),&info);
@@ -138,11 +173,13 @@ struct WindowPreviews::Impl {
         for(size_t i=0;i<items.size();++i) {
             const auto t=tile(i),thumb=thumb_area(i);
             if(static_cast<int>(i)==hover){color(palette.hover);dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(t.left-4*fit,t.top-4*fit,t.right+4*fit,t.bottom+4*fit),12*fit,12*fit),brush.get());}
-            if(small_icon)dc->DrawBitmap(small_icon.get(),D2D1::RectF(t.left+4*fit,t.top+7*fit,t.left+20*fit,t.top+23*fit));
-            const float title_right=static_cast<int>(i)==hover?close_rect(i).left-2:t.right-4*fit;
+            if(!items[i].members.empty()){color(palette.ink);dc->DrawTextW(L"\xE8A9",1,glyph_font.get(),D2D1::RectF(t.left+4*fit,t.top+7*fit,t.left+20*fit,t.top+23*fit),brush.get());} // Tiles glyph: a group.
+            else if(small_icon)dc->DrawBitmap(small_icon.get(),D2D1::RectF(t.left+4*fit,t.top+7*fit,t.left+20*fit,t.top+23*fit));
+            const bool group=!items[i].members.empty();
+            const float title_right=static_cast<int>(i)==hover&&!group?close_rect(i).left-2:t.right-4*fit;
             color(palette.ink);title_font->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             dc->DrawTextW(items[i].title.c_str(),static_cast<UINT32>(items[i].title.size()),title_font.get(),D2D1::RectF(t.left+26*fit,t.top,title_right,t.top+title_height*fit),brush.get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            if(static_cast<int>(i)==hover) {
+            if(static_cast<int>(i)==hover&&!group) {
                 const auto c=close_rect(i);
                 if(hover_close){color(theme::rgb(0xc42b1c,.92f));dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F((c.left+c.right)/2,(c.top+c.bottom)/2),10*fit,10*fit),brush.get());}
                 color(hover_close?theme::rgb(0xffffff):palette.ink);
@@ -151,6 +188,18 @@ struct WindowPreviews::Impl {
             // Thumbnail frame; DWM draws the live image inside it. Minimized
             // windows have no live image, so show the app icon instead.
             color(palette.field);dc->FillRoundedRectangle(D2D1::RoundedRect(thumb,8*fit,8*fit),brush.get());
+            if(group) { // Each snapped window in its place; DWM draws the live ones on top.
+                const auto inner=D2D1::RectF(thumb.left+4*fit,thumb.top+4*fit,thumb.right-4*fit,thumb.bottom-4*fit);
+                for(size_t m=0;m<items[i].members.size();++m) {
+                    const auto r=member_rect(items[i],m,inner);const auto& member=items[i].members[m];
+                    color(palette.tile);dc->FillRoundedRectangle(D2D1::RoundedRect(r,4*fit,4*fit),brush.get());
+                    if(member.iconic||!member.thumbnail) {
+                        color(palette.ink_secondary);
+                        dc->DrawTextW(member.title.c_str(),static_cast<UINT32>(member.title.size()),note_font.get(),D2D1::RectF(r.left+4*fit,r.top,r.right-4*fit,r.bottom),brush.get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                    }
+                }
+                continue;
+            }
             if(items[i].iconic||!items[i].thumbnail) {
                 const float cx=(thumb.left+thumb.right)/2,cy=(thumb.top+thumb.bottom)/2-8*fit;
                 if(large_icon)dc->DrawBitmap(large_icon.get(),D2D1::RectF(cx-20*fit,cy-20*fit,cx+20*fit,cy+20*fit));
@@ -167,20 +216,28 @@ struct WindowPreviews::Impl {
     void update_thumbnails() {
         const float scale=dpi/96,s=reveal.scale();const auto p=pivot();
         const BYTE opacity=static_cast<BYTE>(std::lround(std::clamp(reveal.opacity(),0.0f,1.0f)*255));
-        for(size_t i=0;i<items.size();++i) {
-            auto& item=items[i];if(!item.thumbnail)continue;
-            auto area=thumb_area(i);area=D2D1::RectF(area.left+3*fit,area.top+3*fit,area.right-3*fit,area.bottom-3*fit);
-            // Aspect-fit the source inside the frame.
-            const float sw=static_cast<float>(std::max<LONG>(1,item.source.cx)),sh=static_cast<float>(std::max<LONG>(1,item.source.cy));
+        const auto map=[&](float x,float y){return D2D1::Point2F((p.x+(x-p.x)*s)*scale,(p.y+(y-p.y)*s+reveal.offset())*scale);};
+        // Aspect-fits a source inside `area` and places its live image there.
+        const auto show=[&](HTHUMBNAIL thumbnail,SIZE source,D2D1_RECT_F area) {
+            const float sw=static_cast<float>(std::max<LONG>(1,source.cx)),sh=static_cast<float>(std::max<LONG>(1,source.cy));
             const float zoom=std::min((area.right-area.left)/sw,(area.bottom-area.top)/sh);
             const float w=sw*zoom,h=sh*zoom,cx=(area.left+area.right)/2,cy=(area.top+area.bottom)/2;
-            const auto map=[&](float x,float y){return D2D1::Point2F((p.x+(x-p.x)*s)*scale,(p.y+(y-p.y)*s+reveal.offset())*scale);};
             const auto a=map(cx-w/2,cy-h/2),b=map(cx+w/2,cy+h/2);
             DWM_THUMBNAIL_PROPERTIES properties{};
             properties.dwFlags=DWM_TNP_RECTDESTINATION|DWM_TNP_VISIBLE|DWM_TNP_OPACITY|DWM_TNP_SOURCECLIENTAREAONLY;
             properties.rcDestination={static_cast<LONG>(std::lround(a.x)),static_cast<LONG>(std::lround(a.y)),static_cast<LONG>(std::lround(b.x)),static_cast<LONG>(std::lround(b.y))};
             properties.fVisible=TRUE;properties.opacity=opacity;properties.fSourceClientAreaOnly=FALSE;
-            DwmUpdateThumbnailProperties(item.thumbnail,&properties);
+            DwmUpdateThumbnailProperties(thumbnail,&properties);
+        };
+        for(size_t i=0;i<items.size();++i) {
+            auto& item=items[i];auto area=thumb_area(i);
+            if(!item.members.empty()) {
+                const auto inner=D2D1::RectF(area.left+4*fit,area.top+4*fit,area.right-4*fit,area.bottom-4*fit);
+                for(size_t m=0;m<item.members.size();++m)if(item.members[m].thumbnail)show(item.members[m].thumbnail,item.members[m].source,member_rect(item,m,inner));
+                continue;
+            }
+            if(!item.thumbnail)continue;
+            show(item.thumbnail,item.source,D2D1::RectF(area.left+3*fit,area.top+3*fit,area.right-3*fit,area.bottom-3*fit));
         }
     }
     void destroy() {
@@ -191,12 +248,13 @@ struct WindowPreviews::Impl {
     }
     void hit(LPARAM l) {
         const auto point=content(l);int over=-1;bool close=false;
-        for(size_t i=0;i<items.size();++i){const auto t=tile(i);if(inside(D2D1::RectF(t.left-4*fit,t.top-4*fit,t.right+4*fit,t.bottom+4*fit),point.x,point.y)){over=static_cast<int>(i);close=inside(close_rect(i),point.x,point.y);break;}}
+        for(size_t i=0;i<items.size();++i){const auto t=tile(i);if(inside(D2D1::RectF(t.left-4*fit,t.top-4*fit,t.right+4*fit,t.bottom+4*fit),point.x,point.y)){over=static_cast<int>(i);close=items[i].members.empty()&&inside(close_rect(i),point.x,point.y);break;}}
         if(over!=hover||close!=hover_close){hover=over;hover_close=close;schedule();}
     }
     void remove(size_t index) {
         if(index>=items.size())return;
         if(items[index].thumbnail)DwmUnregisterThumbnail(items[index].thumbnail);
+        for(auto& member:items[index].members)if(member.thumbnail)DwmUnregisterThumbnail(member.thumbnail);
         items.erase(items.begin()+static_cast<std::ptrdiff_t>(index));hover=-1;
         if(items.empty()){close(true);return;}
         RECT current{};GetWindowRect(hwnd,&current);
@@ -233,7 +291,13 @@ struct WindowPreviews::Impl {
             if(closing)return 0;hit(l);
             if(hover<0)return 0;
             const auto index=static_cast<size_t>(hover);const auto target=items[index].window;
-            if(message==WM_MBUTTONUP||hover_close){PostMessageW(target,WM_CLOSE,0,0);remove(index);return 0;}
+            if(!items[index].members.empty()) {
+                if(message==WM_MBUTTONUP)return 0; // A group has no single window to close.
+                // Restore the whole group (snapped windows return to their places),
+                // then bring each forward, ending with this app's window.
+                for(const auto& member:items[index].members)if(IsWindow(member.window)&&IsIconic(member.window))ShowWindow(member.window,SW_RESTORE);
+                for(const auto& member:items[index].members)if(member.window!=target&&IsWindow(member.window))activate_window(member.window);
+            } else if(message==WM_MBUTTONUP||hover_close){PostMessageW(target,WM_CLOSE,0,0);remove(index);return 0;}
             activate_window(target);
             if(IsWindow(owner))PostMessageW(owner,previews_event_message,1,reinterpret_cast<LPARAM>(target));
             close(true);return 0;
@@ -246,7 +310,7 @@ struct WindowPreviews::Impl {
 };
 WindowPreviews::WindowPreviews():impl_(std::make_unique<Impl>()){}
 WindowPreviews::~WindowPreviews(){impl_->close(false);}
-void WindowPreviews::open(HWND owner,const std::wstring& key,const std::wstring& name,const std::vector<HWND>& windows,NativeIcon icon,
+void WindowPreviews::open(HWND owner,const std::wstring& key,const std::wstring& name,const std::vector<HWND>& windows,const std::vector<SnapGroup>& groups,NativeIcon icon,
                           RECT anchor,LONG dock_top,UINT dpi,const theme::Palette& palette,bool live,bool reduced) {
     auto& i=*impl_;
     if(windows.empty()||!GlassHost::available()){close(false);return;}
@@ -265,7 +329,7 @@ void WindowPreviews::open(HWND owner,const std::wstring& key,const std::wstring&
         i.closing=false;i.reveal.open(Impl::now(),reduced);
     }
     i.key=key;i.hover=-1;i.hover_close=false;
-    i.rebuild(windows);
+    i.rebuild(windows,groups);
     i.place(anchor,dock_top);
     i.register_thumbnails();
     i.render();

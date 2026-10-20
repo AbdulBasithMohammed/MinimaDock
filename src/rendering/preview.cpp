@@ -2444,6 +2444,8 @@ public:
         std::vector<RecentItem> recent;ShellItemMenu shell;std::vector<AppContextMenu::WindowCommand> commands;
     };
     std::unique_ptr<JumpContext> jump_context;
+    // Jump list entries for the app's own windows (between the window commands and recent items).
+    static constexpr UINT window_entry_first=2000;static constexpr size_t window_entries=20;
     unsigned jump_session=0;
     VolumeControl volume;
     int previews_slot=-1,drag_candidate=-1;
@@ -2475,7 +2477,8 @@ public:
         const auto& g=scene.groups[i];
         POINT top{0,static_cast<LONG>(std::lround((scene.dock().top+(live_dock?visibility.offset():0))*dpi/96))};ClientToScreen(hwnd,&top);
         try {
-            previews.open(hwnd,group_key(g),g.name,g.windows,g.icon,slot_screen(i),top.y,static_cast<UINT>(dpi),scene.pal,scene.transparency&&!scene.high_contrast,scene.reduced);
+            if(live_dock)refresh_snap_groups();
+            previews.open(hwnd,group_key(g),g.name,g.windows,snap_groups_of(g.windows),g.icon,slot_screen(i),top.y,static_cast<UINT>(dpi),scene.pal,scene.transparency&&!scene.high_contrast,scene.reduced);
         } catch(HRESULT error) {
             log_error("previews",error);
             try{previews.close(false);}catch(...){}
@@ -2486,6 +2489,58 @@ public:
         scene.machine.hold(Hold::Flyout,flyout_open(),now());schedule();
     }
     void close_previews(bool animated=true){if(previews.visible())previews.close(animated);}
+    // Windows 11 snap groups have no public API, so they are recognised here:
+    // snapped windows side by side on one monitor (the top-most ones that don't
+    // overlap). A group is remembered while its windows are minimized, until one
+    // is closed or shown again un-snapped.
+    std::vector<SnapGroup> snap_groups;
+    void refresh_snap_groups() {
+        struct Found {HWND window;RECT frame;HMONITOR monitor;};
+        std::vector<Found> found;
+        EnumWindows([](HWND window,LPARAM data)->BOOL {
+            if(!IsWindowVisible(window)||IsIconic(window)||!window_arranged(window))return TRUE;
+            if(GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_TOOLWINDOW)return TRUE;
+            DWORD cloaked=0;RECT frame{};
+            if(SUCCEEDED(DwmGetWindowAttribute(window,DWMWA_CLOAKED,&cloaked,sizeof(cloaked)))&&cloaked)return TRUE;
+            if(FAILED(DwmGetWindowAttribute(window,DWMWA_EXTENDED_FRAME_BOUNDS,&frame,sizeof(frame))))return TRUE;
+            reinterpret_cast<std::vector<Found>*>(data)->push_back({window,frame,MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST)});
+            return TRUE;
+        },reinterpret_cast<LPARAM>(&found));
+        // EnumWindows runs top to bottom: keep each monitor's visible layout.
+        std::vector<SnapGroup> live;std::vector<HMONITOR> monitors;
+        const auto overlaps=[](const RECT& a,const RECT& b){RECT i{};if(!IntersectRect(&i,&a,&b))return false;const auto area=[](const RECT& r){return static_cast<long long>(r.right-r.left)*(r.bottom-r.top);};return area(i)*10>std::min(area(a),area(b));};
+        for(const auto& f:found) {
+            size_t m=0;while(m<monitors.size()&&monitors[m]!=f.monitor)++m;
+            if(m==monitors.size()){monitors.push_back(f.monitor);auto& g=live.emplace_back();MONITORINFO info{sizeof(info),{},{},0};GetMonitorInfoW(f.monitor,&info);g.area=info.rcWork;}
+            auto& g=live[m];
+            if(std::any_of(g.frames.begin(),g.frames.end(),[&](const RECT& r){return overlaps(r,f.frame);}))continue;
+            g.windows.push_back(f.window);g.frames.push_back(f.frame);
+        }
+        std::erase_if(live,[](const SnapGroup& g){return g.windows.size()<2;});
+        // Remembered groups survive while every window is minimized or still snapped.
+        const auto in_live=[&](HWND w){for(const auto& g:live)if(std::find(g.windows.begin(),g.windows.end(),w)!=g.windows.end())return true;return false;};
+        for(const auto& old:snap_groups) {
+            const bool keep=std::all_of(old.windows.begin(),old.windows.end(),[&](HWND w){return IsWindow(w)&&!in_live(w)&&(IsIconic(w)||window_arranged(w));});
+            if(keep)live.push_back(old);
+        }
+        // "Chrome + Discord": the dock's app names, or the window title.
+        for(auto& g:live) {
+            g.label.clear();
+            for(const auto w:g.windows) {
+                std::wstring part;
+                for(const auto& app:scene.groups)if(std::find(app.windows.begin(),app.windows.end(),w)!=app.windows.end()){part=app.name;break;}
+                if(part.empty()){wchar_t title[128]{};GetWindowTextW(w,title,128);part=title;}
+                if(!g.label.empty())g.label+=L" + ";
+                g.label+=part;
+            }
+        }
+        snap_groups=std::move(live);
+    }
+    std::vector<SnapGroup> snap_groups_of(const std::vector<HWND>& windows) const {
+        std::vector<SnapGroup> result;
+        for(const auto& g:snap_groups)if(std::any_of(g.windows.begin(),g.windows.end(),[&](HWND w){return std::find(windows.begin(),windows.end(),w)!=windows.end();}))result.push_back(g);
+        return result;
+    }
     bool previews_supported() const{return scene.desktop&&GlassHost::available();}
     // Hover intent: the name shows after 150 ms and window previews after 450 ms.
     // Once a name or previews are showing, moving to another icon switches at once.
@@ -3510,6 +3565,7 @@ public:
     }
     void fullscreen() {
         if(!live_dock)return;
+        refresh_snap_groups(); // Catches a group while it is visible, before it is minimized.
         auto foreground=GetForegroundWindow();RECT bounds{};MONITORINFO info{sizeof(info),{},{},0};
         DWORD owner=0;GetWindowThreadProcessId(foreground,&owner);
         // Activation can briefly report no foreground while an owned popup closes.
@@ -3739,6 +3795,18 @@ public:
         context->app_id=jump_list_app_id(group.windows,group.launch_path,group.executable,group.app_id);
         context->lists=read_jump_list(context->app_id,jump_list_item_limit(),static_cast<UINT>(std::lround(16*dpi/96)));
         std::vector<JumpSection> sections;
+        // Several windows: list them first, so one can be picked without hovering.
+        size_t open=0;for(const auto w:group.windows)if(IsWindow(w))++open;
+        if(open>1) {
+            auto& section=sections.emplace_back();section.title=L"Open windows";section.fixed=true;
+            for(size_t w=0;w<group.windows.size()&&w<window_entries;++w) {
+                if(!IsWindow(group.windows[w]))continue;
+                wchar_t title[256]{};GetWindowTextW(group.windows[w],title,256);
+                auto& e=section.entries.emplace_back();e.id=window_entry_first+static_cast<UINT>(w);
+                e.text=title[0]?title:group.name;e.icon=group.icon;
+                if(IsIconic(group.windows[w]))e.text+=L"  (minimized)";
+            }
+        }
         for(size_t g=0;g<context->lists.size();++g) {
             const auto& list=context->lists[g];
             auto& section=sections.emplace_back();section.title=list.name;
@@ -3806,7 +3874,11 @@ public:
         const bool ours=foreground==hwnd||foreground==jump.window();
         const auto* item=jump_item(*context,selected);
         bool opens=selected==AppContextMenu::launch_id||item;
-        if(item){if(!invoke_jump_item(hwnd,*item))MessageBoxW(hwnd,L"Windows could not open this item.",L"MinimaDock",MB_OK|MB_ICONERROR);}
+        if(selected>=window_entry_first&&selected<window_entry_first+window_entries) {
+            const size_t w=selected-window_entry_first;
+            if(w<context->group.windows.size()&&IsWindow(context->group.windows[w]))activate_window(context->group.windows[w]);
+            opens=true;
+        } else if(item){if(!invoke_jump_item(hwnd,*item))MessageBoxW(hwnd,L"Windows could not open this item.",L"MinimaDock",MB_OK|MB_ICONERROR);}
         else if(selected&&!run_app_command(context->group,selected,context->recent,context->shell,POINT{})) {
             for(const auto& action:context->commands)if(action.id==selected) {
                 if(IsWindow(action.window)){activate_window(action.window);if(action.command)PostMessageW(action.window,WM_SYSCOMMAND,action.command,0);}
