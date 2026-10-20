@@ -3658,7 +3658,15 @@ public:
     static void set_starts_with_windows(bool on) {
         if(!on){RegDeleteKeyValueW(HKEY_CURRENT_USER,run_key,L"MinimaDock");return;}
         wchar_t module[32768]{};if(!GetModuleFileNameW(nullptr,module,32768))return;
-        const auto command=L"\""+(std::filesystem::path(module).parent_path()/L"MinimaDockTrial.exe").wstring()+L"\" --run";
+        // Installed: the installer's sign-in step (it sets aside a journal left by
+        // the last shutdown, then starts the supervisor), as Install registers it.
+        const auto folder=std::filesystem::path(module).parent_path();
+        const auto manager=folder.parent_path().parent_path()/L"Manage-MinimaDock.ps1";
+        wchar_t windows[MAX_PATH]{};GetWindowsDirectoryW(windows,MAX_PATH);
+        std::error_code ignored;
+        const auto command=std::filesystem::is_regular_file(manager,ignored)
+            ?L"\""+(std::filesystem::path(windows)/L"System32\\WindowsPowerShell\\v1.0\\powershell.exe").wstring()+L"\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \""+manager.wstring()+L"\" -Action SignIn"
+            :L"\""+(folder/L"MinimaDockTrial.exe").wstring()+L"\" --run";
         RegSetKeyValueW(HKEY_CURRENT_USER,run_key,L"MinimaDock",REG_SZ,command.c_str(),static_cast<DWORD>((command.size()+1)*sizeof(wchar_t)));
     }
     // Menus in the same glass style as the app jump lists (and the system theme).
