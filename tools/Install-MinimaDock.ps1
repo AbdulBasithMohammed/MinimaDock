@@ -6,7 +6,8 @@
 #   Stop       bring back the Windows taskbar until the next sign-in
 #   Start      start the installed MinimaDock again
 #   Status     report whether it is running and starts with Windows
-param([ValidateSet('Install','Uninstall','Stop','Start','Status')][string]$Action='Install',[switch]$Outside,[string]$Log)
+#   SignIn     what Windows runs at sign-in: set aside stale journals, then start
+param([ValidateSet('Install','Uninstall','Stop','Start','Status','SignIn')][string]$Action='Install',[switch]$Outside,[string]$Log)
 $ErrorActionPreference='Stop'
 if($Log){Start-Transcript -LiteralPath $Log -Force | Out-Null}
 
@@ -72,7 +73,9 @@ function Write-Record($Directory) {
 }
 function Set-Registration($Install) {
     if(-not (Test-Path $runKey)){New-Item -Path $runKey -Force | Out-Null}
-    Set-ItemProperty -Path $runKey -Name 'MinimaDock' -Value ('"'+$Install.Guard+'" --run')
+    # Through Windows' own PowerShell, so a journal left by the last shutdown is
+    # set aside even when this PC runs an older supervisor (see Clear-StaleJournals).
+    Set-ItemProperty -Path $runKey -Name 'MinimaDock' -Value ('"'+$env:SystemRoot+'\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$manager+'" -Action SignIn')
     $info=(Get-Item -LiteralPath $Install.Dock).VersionInfo
     New-Item -Path $uninstallKey -Force | Out-Null
     $size=[int]((Get-ChildItem -LiteralPath $Install.Directory -File | Measure-Object Length -Sum).Sum/1KB)
@@ -91,8 +94,33 @@ function Remove-OldVersions([string[]]$Keep) {
     }
 }
 
+# A shutdown can end the session before the supervisor removes its journal; at
+# the next sign-in the supervisor refuses a journal from another session. Windows
+# recreates the taskbar and resets the work area at sign-in, so a journal of this
+# user from an earlier session whose dock is gone has nothing left to restore.
+function Clear-StaleJournals {
+    if(-not (Test-Path -LiteralPath $versions)){return}
+    $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$session=(Get-Process -Id $PID).SessionId
+    Get-ChildItem -LiteralPath $versions -Directory | ForEach-Object {
+        $journal=Join-Path $_.FullName 'taskbar-trial.state'
+        if(-not (Test-Path -LiteralPath $journal)){return}
+        $fields=((Get-Content -LiteralPath $journal -TotalCount 1) -split '\s+')
+        if($fields.Count -lt 5 -or $fields[1] -ne $sid -or [int]$fields[2] -eq $session){return}
+        $dock=Get-Process -Id ([int]$fields[3]) -ErrorAction SilentlyContinue
+        if($dock -and $dock.StartTime.ToFileTimeUtc() -eq [int64]$fields[4]){return} # Still running elsewhere.
+        Move-Item -LiteralPath $journal -Destination ($journal+'.previous-session') -Force
+    }
+}
+
 $principal=New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Run this as your normal unelevated desktop user.'}
+Clear-StaleJournals
+
+if($Action -eq 'SignIn') {
+    $install=Get-Install;if(-not $install){exit 0}
+    Start-Process -FilePath $install.Guard -ArgumentList '--run' -WorkingDirectory $install.Directory
+    exit 0
+}
 
 if($Action -eq 'Status') {
     $install=Get-Install

@@ -115,7 +115,18 @@ struct Journal {
         Journal j;const auto path=directory()/state_name;if(!std::filesystem::exists(path))return j;
         if(std::filesystem::file_size(path)>16384)throw std::runtime_error("Invalid taskbar recovery journal.");
         std::wifstream file(path);std::wstring magic,user;DWORD session=0,current=0;
-        if(!(file>>magic>>user>>session>>j.dock_pid>>j.dock_time)||(magic!=L"MinimaDockTaskbarTrial1"&&magic!=L"MinimaDockTaskbarTrial2")||user!=own_sid()||!ProcessIdToSessionId(GetCurrentProcessId(),&current)||session!=current)throw std::runtime_error("Taskbar journal belongs to another user or session.");
+        if(!(file>>magic>>user>>session>>j.dock_pid>>j.dock_time)||(magic!=L"MinimaDockTaskbarTrial1"&&magic!=L"MinimaDockTaskbarTrial2")||user!=own_sid()||!ProcessIdToSessionId(GetCurrentProcessId(),&current))throw std::runtime_error("Taskbar journal belongs to another user or session.");
+        if(session!=current) {
+            // Left by an earlier sign-in (a shutdown can end the session before the
+            // journal is removed). Windows recreates the taskbar and resets the work
+            // area at every sign-in, so there is nothing to restore: set it aside.
+            // A journal whose dock is still running belongs to another live session.
+            Handle dock(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,j.dock_pid));
+            if(dock.value&&created(dock.value)==j.dock_time)throw std::runtime_error("Taskbar journal belongs to another user or session.");
+            file.close();std::error_code ignored;
+            std::filesystem::rename(path,directory()/(std::wstring(state_name)+L".previous-session"),ignored);
+            return Journal{};
+        }
         if(magic==L"MinimaDockTaskbarTrial1") {
             Bar b;while(file>>b.hwnd>>b.time>>b.pid>>b.visible){if(j.bars.size()>=32)throw std::runtime_error("Too many taskbars in journal.");j.bars.push_back(b);}
         } else {
