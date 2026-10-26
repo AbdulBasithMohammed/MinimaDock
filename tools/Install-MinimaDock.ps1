@@ -50,12 +50,29 @@ function Get-Install {
     if(-not (Test-Path -LiteralPath $guard) -or (Get-FileHash -LiteralPath $guard -Algorithm SHA256).Hash -cne $state.GuardSha256){throw 'The MinimaDock supervisor is missing or has changed. Keep the install folder intact.'}
     [pscustomobject]@{Directory=$directory;Guard=$guard;Dock=(Join-Path $directory 'MinimaDock.exe')}
 }
+$blockedMessage='Windows (Smart App Control) is blocking MinimaDock on this PC, so it cannot start. Your Windows taskbar is unaffected. See the README FAQ about Smart App Control.'
+function Test-Blocked($ErrorRecord){return $ErrorRecord.Exception.Message -match 'Application Control|blocked this file'}
 function Invoke-Supervisor($Install,[string]$Decision) {
-    $command=Start-Process -FilePath $Install.Guard -ArgumentList ('--'+$Decision) -WorkingDirectory $Install.Directory -WindowStyle Hidden -PassThru
+    try {$command=Start-Process -FilePath $Install.Guard -ArgumentList ('--'+$Decision) -WorkingDirectory $Install.Directory -WindowStyle Hidden -PassThru}
+    catch {
+        if(-not (Test-Blocked $_)){throw}
+        # Windows blocks the supervisor's file, so a new copy cannot start. One
+        # started before the block keeps running and still answers its own window
+        # (WM_APP+22 status, WM_APP+20 revert); with none running there is nothing to undo.
+        Add-Type -Name Control -Namespace MinimaDockInstall -MemberDefinition '[DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern System.IntPtr FindWindowW(string c,System.IntPtr n);[DllImport("user32.dll")] public static extern System.IntPtr SendMessageTimeoutW(System.IntPtr h,uint m,System.IntPtr w,System.IntPtr l,uint f,uint t,out System.UIntPtr r);' -ErrorAction SilentlyContinue
+        $control=[MinimaDockInstall.Control]::FindWindowW('MinimaDock.Trial.Control',[IntPtr]::Zero)
+        if($control -eq [IntPtr]::Zero){return $(if($Decision -eq 'status'){3}else{0})}
+        $message=switch($Decision){'revert'{0x8014}'keep'{0x8015}default{0x8016}}
+        $reply=[UIntPtr]::Zero
+        if([MinimaDockInstall.Control]::SendMessageTimeoutW($control,$message,[IntPtr]::Zero,[IntPtr]::Zero,0x3,6000,[ref]$reply) -eq [IntPtr]::Zero){throw 'MinimaDock did not answer. Press Ctrl+Alt+Backspace to bring back the Windows taskbar.'}
+        if($Decision -eq 'status'){return [int]$reply.ToUInt32()}
+        return $(if($reply.ToUInt32() -eq 1){0}else{6})
+    }
     try {if(-not $command.WaitForExit(12000)){throw 'MinimaDock did not answer. Press Ctrl+Alt+Backspace to bring back the Windows taskbar.'};$command.ExitCode}finally{$command.Dispose()}
 }
 function Start-Supervisor($Install) {
-    $process=Start-Process -FilePath $Install.Guard -ArgumentList '--run' -WorkingDirectory $Install.Directory -WindowStyle Hidden -PassThru
+    try {$process=Start-Process -FilePath $Install.Guard -ArgumentList '--run' -WorkingDirectory $Install.Directory -WindowStyle Hidden -PassThru}
+    catch {if(Test-Blocked $_){throw $blockedMessage};throw}
     try {
         for($i=0;$i -lt 120;$i++) {
             Start-Sleep -Milliseconds 500
@@ -180,7 +197,8 @@ foreach($name in 'MinimaDock.exe','MinimaDockTrial.exe') {
 foreach($notice in 'LICENSE','THIRD_PARTY_NOTICES.md'){foreach($folder in $source,$repo){$file=Join-Path $folder $notice;if(Test-Path -LiteralPath $file){Copy-Item -LiteralPath $file -Destination $directory;break}}}
 # Probe the exact installed executable before touching the running dock.
 . (Join-Path $PSScriptRoot 'Dock-LaunchCheck.ps1')
-Assert-DockLaunchable (Join-Path $directory 'MinimaDock.exe')
+try {Assert-DockLaunchable (Join-Path $directory 'MinimaDock.exe')}
+catch {Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue;throw} # Nothing else was changed.
 # Retire a running temporary trial and the previous installed version.
 $testScript=Join-Path $PSScriptRoot 'Taskbar-Test.ps1'
 if((Test-Path -LiteralPath (Join-Path $source 'active-taskbar-test.json')) -and (Test-Path -LiteralPath $testScript)) {
